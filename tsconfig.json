@@ -8,7 +8,7 @@
     "allowJs": false,
     "noImplicitAny": true,
     "moduleResolution": "node",
-    "importHelpers": true,
+    "importHelpers": false,
     "isolatedModules": true,
     "strictNullChecks": true,
     "lib": ["DOM", "ES6", "ES7", "ES2020"]
