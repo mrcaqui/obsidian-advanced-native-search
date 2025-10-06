@@ -1,0 +1,18 @@
+{
+  "name": "advanced-native-search",
+  "version": "1.0.0",
+  "description": "Enhances the native search experience by inspecting search results from official and unofficial APIs.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "builtin-modules": "3.3.0",
+    "esbuild": "0.19.12",
+    "obsidian": "latest",
+    "typescript": "5.4.5"
+  }
+}

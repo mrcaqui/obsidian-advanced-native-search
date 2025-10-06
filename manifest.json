@@ -1,0 +1,11 @@
+{
+  "id": "advanced-native-search",
+  "name": "Advanced native search",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "Enhances the native search experience by inspecting search results from official and unofficial APIs.",
+  "author": "Your Name",
+  "authorUrl": "",
+  "isDesktopOnly": false,
+  "main": "main.js"
+}
