@@ -92,7 +92,7 @@ function includesWithCase(haystack: string, needle: string, caseSensitive: boole
 /**
  * 値 v がパターン pat に一致するか（ファイル名・パス等用）
  * - /regex/ の場合は正規表現
- - * ? を含む場合はグロブ
+ * - * ? を含む場合はグロブ
  * - それ以外はサブストリング
  */
 function matchPattern(v: string, pat: string, caseSensitive: boolean): boolean {
@@ -345,6 +345,96 @@ interface MatchLog {
   searchResult?: any;
   // regexモード時のマッチ数（簡易）
   regexMatchCount?: number;
+  // 追加: 抜粋行（ログ表示用、最大 N 行）
+  excerpts?: Excerpt[];
+}
+
+/**
+ * ヒット行の抜粋情報。
+ */
+interface Excerpt {
+  line: number;        // 0-based
+  text: string;        // 行テキスト（整形済み）
+  sources: string[];   // どの条件でヒットしたか（"line", "content:<pattern>", "contentQuery:<mode>" など）
+}
+
+/**
+ * 1行をログ用に整形（長すぎる行を切る、タブや制御文字を整える）。
+ */
+function formatLineForLog(s: string, maxLen = 240): string {
+  const cleaned = s.replace(/\t/g, "  ").replace(/\r/g, "").replace(/\u0000/g, "");
+  if (cleaned.length <= maxLen) return cleaned;
+  return cleaned.slice(0, maxLen - 1) + "…";
+}
+
+/**
+ * 抜粋を抽出する。
+ * - line: AND用の1本の正規表現を行ごとに適用。
+ * - content: 各パターンを行ごとに適用。
+ * - 本文クエリ: simple/fuzzyは searchFn を行ごとに、regexは regexForContentQuery を行ごとに適用。
+ */
+function extractHitLines(
+  text: string,
+  parsed: ParsedQuery,
+  options: SearchOptions,
+  searchFn: ((text: string) => any) | null,
+  regexForContentQuery: RegExp | null,
+  perFileLimit = 10
+): Excerpt[] {
+  const { caseSensitive, mode } = options;
+  const lines = text.split(/\r?\n/);
+
+  // 行番号 -> 理由(Set) を集計
+  const reasons = new Map<number, Set<string>>();
+
+  const addReason = (idx: number, r: string) => {
+    if (idx < 0 || idx >= lines.length) return;
+    if (!reasons.has(idx)) reasons.set(idx, new Set<string>());
+    reasons.get(idx)!.add(r);
+  };
+
+  // line:（同じ行に全語 — AND）
+  if (parsed.linePatterns.length > 0) {
+    const literal = parsed.linePatterns[0];
+    const rx = tryParseExplicitRegex(literal) ?? new RegExp(literal, caseSensitive ? "" : "i");
+    for (let i = 0; i < lines.length; i++) {
+      if (rx.test(lines[i])) addReason(i, "line");
+    }
+  }
+
+  // content:（本文に含まれる語句 — AND（ファイル採用条件）だが、抜粋は OR で列挙）
+  if (parsed.contentPatterns.length > 0) {
+    for (const pat of parsed.contentPatterns) {
+      for (let i = 0; i < lines.length; i++) {
+        if (contentContains(lines[i], pat, caseSensitive)) addReason(i, `content:${pat}`);
+      }
+    }
+  }
+
+  // 本文クエリ（自由語）: simple/fuzzy/regex
+  if (parsed.contentQuery) {
+    if ((mode === "simple" || mode === "fuzzy") && searchFn) {
+      for (let i = 0; i < lines.length; i++) {
+        if (searchFn(lines[i])) addReason(i, `contentQuery:${mode}`);
+      }
+    } else if (mode === "regex" && regexForContentQuery) {
+      for (let i = 0; i < lines.length; i++) {
+        if (regexForContentQuery.test(lines[i])) addReason(i, "contentQuery:regex");
+      }
+    }
+  }
+
+  // Map -> Excerpt[]
+  const all = Array.from(reasons.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map<Excerpt>(([idx, set]) => ({
+      line: idx,
+      text: formatLineForLog(lines[idx]),
+      sources: Array.from(set.values()),
+    }));
+
+  // ログしすぎを防止
+  return all.slice(0, perFileLimit);
 }
 
 /**
@@ -753,7 +843,7 @@ class QueryPromptModal extends Modal {
     };
   }
 
-  // オプション（モード・ケース・ソート・件数制限）
+  // オプション（モード・ケース・件数制限・ソート）
   private makeOptionsRow(parent: HTMLElement) {
     const row = parent.createEl("div");
     row.style.display = "grid";
@@ -876,6 +966,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
    * - UIで追加した各フィルタはAND条件。
    * - line は「同じ行に全語」のAND条件で判定し、行ヒット数（ユニーク行）を集計します。
    * - デフォルトモードは Simple。
+   * - 追加: 採用されたファイルごとに、ヒット行の抜粋を最大10行までコンソールに表示します。
    */
   private async runNativeLikeSearch(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
     const t0 = performance.now();
@@ -1037,7 +1128,18 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         }
       }
 
+      // ここまで通過したらファイル採用
       matchedFiles += 1;
+
+      // 抜粋行（ログ用、最大10行など）
+      const excerpts = extractHitLines(
+        text,
+        parsed,
+        options,
+        searchFn,
+        regexForContentQuery,
+        10 // 1ファイルあたり最大行数。必要に応じて変更可。
+      );
 
       const logEntry: MatchLog = {
         path,
@@ -1058,6 +1160,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         line: lineDetail,
         searchResult: searchResult ?? undefined,
         regexMatchCount,
+        excerpts,
       };
 
       matches.push(logEntry);
@@ -1082,6 +1185,28 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
     console.log("[ANS] 検索時間(ms):", Math.round(t1 - t0));
     console.log("[ANS] 結果サンプル（最大10件）:", matches.slice(0, 10));
     console.log("[ANS] 全結果（ファイル単位の詳細）:", matches);
+
+    // 追加: ファイルごとのヒット行（抜粋）をDevToolsに見やすく出力
+    for (const m of matches) {
+      const count = m.excerpts?.length ?? 0;
+      console.groupCollapsed(
+        `%c[ANS] ヒット行 ${count} 件 — ${m.path}`,
+        "color: #7fd3ff; font-weight: 600;"
+      );
+      if (count === 0) {
+        console.log("（抜粋なし）");
+      } else {
+        for (const ex of m.excerpts!) {
+          const ln = ex.line + 1; // 1-based 表示
+          const reasons = ex.sources.join(", ");
+          console.log(`${ln}: ${ex.text}`, { reasons });
+        }
+        if ((m.excerpts?.length ?? 0) >= 10) {
+          console.log("…（このファイルのログは最大10行に制限しています）");
+        }
+      }
+      console.groupEnd();
+    }
 
     new Notice(
       `ANS: 検索完了。ファイル ${matchedFiles} 件、line ヒット ${totalLineHits} 件（DevToolsのコンソールを参照）。`
