@@ -405,6 +405,108 @@ function extractHitLines(
 }
 
 /**
+ * 文字オフセットから行番号(0-based)を推定（fallback用）。
+ */
+function offsetToLine(text: string, offset: number): number {
+  if (offset <= 0) return 0;
+  let line = 0;
+  const len = Math.min(offset, text.length);
+  for (let i = 0; i < len; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) line++;
+  }
+  return line;
+}
+
+/**
+ * section: 見出しヒットの抜粋を生成。
+ * - cache.headings の position.start.line（なければ position.start.offset から推定）を使用。
+ * - sources には "section:<pattern>" を付ける。
+ */
+function buildSectionExcerpts(
+  app: App,
+  file: TFile,
+  text: string,
+  patterns: string[],
+  caseSensitive: boolean
+): Excerpt[] {
+  if (!patterns || patterns.length === 0) return [];
+  const cache = app.metadataCache.getFileCache(file);
+
+  // 修正: undefined を許容しないよう空配列にフォールバックし、型を配列に確定
+  const headings = (cache?.headings ?? []) as any[];
+  if (headings.length === 0) return [];
+
+  const lines = text.split(/\r?\n/);
+  const lineToSources = new Map<number, Set<string>>();
+
+  for (const h of headings) {
+    const headingText: string = String(h?.heading ?? "");
+    if (!headingText) continue;
+
+    for (const pat of patterns) {
+      const rx = tryParseExplicitRegex(pat);
+      const ok = rx ? rx.test(headingText) : matchPattern(headingText, pat, caseSensitive);
+      if (!ok) continue;
+
+      let lineIdx: number | undefined = h?.position?.start?.line;
+      if (typeof lineIdx !== "number") {
+        const off = h?.position?.start?.offset;
+        if (typeof off === "number") {
+          lineIdx = offsetToLine(text, off);
+        }
+      }
+      if (typeof lineIdx !== "number") continue;
+
+      if (!lineToSources.has(lineIdx)) lineToSources.set(lineIdx, new Set<string>());
+      lineToSources.get(lineIdx)!.add(`section:${pat}`);
+    }
+  }
+
+  const excerpts: Excerpt[] = Array.from(lineToSources.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map<Excerpt>(([idx, srcs]) => ({
+      line: idx,
+      text: formatLineForLog(lines[idx] ?? ""),
+      sources: Array.from(srcs.values()),
+    }));
+
+  return excerpts;
+}
+
+/**
+ * 抜粋のマージ（行番号で統合、sources を結合）。perFileLimit を適用。
+ */
+function mergeExcerpts(base: Excerpt[] | undefined, add: Excerpt[], perFileLimit = 10): Excerpt[] {
+  const map = new Map<number, { text: string; sources: Set<string> }>();
+
+  const push = (arr?: Excerpt[]) => {
+    if (!arr) return;
+    for (const ex of arr) {
+      const cur = map.get(ex.line);
+      if (cur) {
+        // 既存テキストが空なら新しい方を採用
+        if (!cur.text && ex.text) cur.text = ex.text;
+        for (const s of ex.sources) cur.sources.add(s);
+      } else {
+        map.set(ex.line, { text: ex.text, sources: new Set(ex.sources) });
+      }
+    }
+  };
+
+  push(base);
+  push(add);
+
+  return Array.from(map.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map<Excerpt>(([line, v]) => ({
+      line,
+      text: v.text,
+      sources: Array.from(v.sources.values()),
+    }))
+    .slice(0, perFileLimit);
+}
+
+/**
  * フィルタ別ヒット数（採用ファイル向け）の集計用型。
  */
 interface FilterHitStats {
@@ -985,6 +1087,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
    * - line は「同じ行に全語」のAND条件で判定し、行ヒット数（ユニーク行）を集計します。
    * - デフォルトモードは Simple。
    * - 追加: 採用ファイルについてフィルタ別のヒット件数内訳を出力。
+   * - 修正: section フィルタのヒット見出し行を excerpts に反映。
    */
   private async runNativeLikeSearch(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
     const t0 = performance.now();
@@ -1149,7 +1252,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       matchedFiles += 1;
 
       // 抜粋行（ログ用、最大10行など）
-      const excerpts = extractHitLines(
+      const baseExcerpts = extractHitLines(
         text,
         parsed,
         options,
@@ -1157,6 +1260,16 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         regexForContentQuery,
         10 // 1ファイルあたり最大行数。必要に応じて変更可。
       );
+
+      // 追加: section ヒット見出しの抜粋を生成してマージ
+      const sectionExcerpts = buildSectionExcerpts(
+        this.app,
+        file,
+        text,
+        parsed.sectionPatterns,
+        caseSensitive
+      );
+      const mergedExcerpts = mergeExcerpts(baseExcerpts, sectionExcerpts, 10);
 
       // フィルタ別ヒット数（採用ファイルのみ）
       const filterHits: FilterHitStats = {};
@@ -1258,7 +1371,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         line: lineDetail,
         searchResult: searchResult ?? undefined,
         regexMatchCount,
-        excerpts,
+        excerpts: mergedExcerpts,
         filterHits,
       };
 
@@ -1284,9 +1397,6 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
     console.log("[ANS] 検索時間(ms):", Math.round(t1 - t0));
     console.log("[ANS] 結果サンプル（最大10件）:", matches.slice(0, 10));
     console.log("[ANS] 全結果（ファイル単位の詳細）:", matches);
-
-    // 追加: フィルタごとのログ出力（採用ファイルに対して）
-    const hasFilter = (len: number | undefined) => (typeof len === "number" ? len > 0 : false);
 
     if (parsed.filePatterns.length > 0) {
       console.groupCollapsed(
@@ -1409,8 +1519,6 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       }
       console.groupEnd();
     }
-
-    // 指示: 「ヒット行 ○ 件 — path」ログは不要のため削除
 
     new Notice(
       `ANS: 検索完了。ファイル ${matchedFiles} 件、line ヒット ${totalLineHits} 件（DevToolsのコンソールを参照）。`
