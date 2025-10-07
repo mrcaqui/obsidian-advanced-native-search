@@ -317,39 +317,6 @@ function contentContains(text: string, pattern: string, caseSensitive: boolean):
 }
 
 /**
- * 検索結果エントリ（ログ用）。
- */
-interface MatchLog {
-  path: string;
-  name: string;
-  stat: { mtime: number; size: number };
-  matched: {
-    file?: string[];
-    path?: string[];
-    tags?: string[];
-    properties?: Array<{ name: string; value: string | RegExp | null }>;
-    contentQuery?: boolean;
-    contentPatterns?: string[];
-    sectionPatterns?: string[];
-    blockIdPatterns?: string[];
-    tasks?: "todo" | "done" | "any" | null;
-    lineTerms?: string[];
-  };
-  // 行ヒット詳細
-  line: {
-    patternLiteral: string | null;
-    hitCount: number; // このファイル内の行ヒット数（ユニーク行）
-    hitLineIndices: number[]; // 行番号（0-based）
-  } | null;
-  // prepare*Searchの結果（あれば）
-  searchResult?: any;
-  // regexモード時のマッチ数（簡易）
-  regexMatchCount?: number;
-  // 追加: 抜粋行（ログ表示用、最大 N 行）
-  excerpts?: Excerpt[];
-}
-
-/**
  * ヒット行の抜粋情報。
  */
 interface Excerpt {
@@ -435,6 +402,57 @@ function extractHitLines(
 
   // ログしすぎを防止
   return all.slice(0, perFileLimit);
+}
+
+/**
+ * フィルタ別ヒット数（採用ファイル向け）の集計用型。
+ */
+interface FilterHitStats {
+  file?: number;
+  path?: number;
+  tag?: number;
+  property?: number;
+  section?: number;
+  block?: number;
+  task?: number;
+  content?: number;
+  line?: number;
+  contentQuery?: number;
+}
+
+/**
+ * 検索結果エントリ（ログ用）。
+ */
+interface MatchLog {
+  path: string;
+  name: string;
+  stat: { mtime: number; size: number };
+  matched: {
+    file?: string[];
+    path?: string[];
+    tags?: string[];
+    properties?: Array<{ name: string; value: string | RegExp | null }>;
+    contentQuery?: boolean;
+    contentPatterns?: string[];
+    sectionPatterns?: string[];
+    blockIdPatterns?: string[];
+    tasks?: "todo" | "done" | "any" | null;
+    lineTerms?: string[];
+  };
+  // 行ヒット詳細
+  line: {
+    patternLiteral: string | null;
+    hitCount: number; // このファイル内の行ヒット数（ユニーク行）
+    hitLineIndices: number[]; // 行番号（0-based）
+  } | null;
+  // prepare*Searchの結果（あれば）
+  searchResult?: any;
+  // regexモード時のマッチ数（簡易）
+  regexMatchCount?: number;
+  // 抜粋行（ログ表示用、最大 N 行）
+  excerpts?: Excerpt[];
+  // 追加: フィルタ別ヒット数
+  filterHits?: FilterHitStats;
 }
 
 /**
@@ -966,7 +984,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
    * - UIで追加した各フィルタはAND条件。
    * - line は「同じ行に全語」のAND条件で判定し、行ヒット数（ユニーク行）を集計します。
    * - デフォルトモードは Simple。
-   * - 追加: 採用されたファイルごとに、ヒット行の抜粋を最大10行までコンソールに表示します。
+   * - 追加: 採用ファイルについてフィルタ別のヒット件数内訳を出力。
    */
   private async runNativeLikeSearch(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
     const t0 = performance.now();
@@ -981,9 +999,8 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
 
     console.log("%c--- [ANS] ネイティブ風検索（開始） ---", "color: cyan; font-weight: bold;");
     console.log("[ANS] パース済みフィルタ:", parsed);
-    console.log("[ANS] オプション:", options);
-    console.log("[ANS] UI状態（line terms）:", uiState.lineTerms);
-    console.log("[ANS] 対象ファイル数:", files.length);
+    // 指示: UI状態（line terms）ログは不要のため削除
+    console.log("[ANS] 対象ファイル数（Vault内のMarkdownファイル; app.vault.getMarkdownFiles() の結果）:", files.length);
 
     // prepare*Search（自由語部分のみに適用）
     let searchFn: ((text: string) => any) | null = null;
@@ -1141,6 +1158,87 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         10 // 1ファイルあたり最大行数。必要に応じて変更可。
       );
 
+      // フィルタ別ヒット数（採用ファイルのみ）
+      const filterHits: FilterHitStats = {};
+
+      if (parsed.filePatterns.length > 0) {
+        filterHits.file = parsed.filePatterns.reduce(
+          (acc, pat) => acc + (matchPattern(name, pat, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.pathPatterns.length > 0) {
+        filterHits.path = parsed.pathPatterns.reduce(
+          (acc, pat) => acc + (matchPattern(path, pat, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.tagFilters.length > 0) {
+        const tagSet = getTagsForFile(this.app, file);
+        filterHits.tag = parsed.tagFilters.reduce((acc, tg) => {
+          const rx = tryParseExplicitRegex(tg);
+          if (rx) {
+            for (const t of tagSet) if (rx.test(t)) return acc + 1;
+            return acc;
+          } else {
+            return acc + (tagSet.has(tg) ? 1 : 0);
+          }
+        }, 0);
+      }
+      if (parsed.propertyFilters.length > 0) {
+        filterHits.property = parsed.propertyFilters.reduce(
+          (acc, pf) => acc + (matchProperty(cache, pf.name, pf.value, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.sectionPatterns.length > 0) {
+        filterHits.section = parsed.sectionPatterns.reduce(
+          (acc, pat) => acc + (matchSection(this.app, file, pat, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.blockIdPatterns.length > 0) {
+        filterHits.block = parsed.blockIdPatterns.reduce(
+          (acc, pat) => acc + (matchBlockId(this.app, file, pat, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.tasks) {
+        const listItems = cache?.listItems;
+        let count = 0;
+        if (Array.isArray(listItems)) {
+          if (parsed.tasks === "any") {
+            count = listItems.filter((it: any) => typeof it.task === "string" && it.task.length > 0).length;
+          } else if (parsed.tasks === "todo") {
+            count = listItems.filter((it: any) => it.task === " ").length;
+          } else if (parsed.tasks === "done") {
+            count = listItems.filter((it: any) => it.task === "x").length;
+          }
+        }
+        filterHits.task = count;
+      }
+      if (parsed.contentPatterns.length > 0) {
+        filterHits.content = parsed.contentPatterns.reduce(
+          (acc, pat) => acc + (contentContains(text, pat, caseSensitive) ? 1 : 0),
+          0
+        );
+      }
+      if (parsed.linePatterns.length > 0) {
+        filterHits.line = lineDetail?.hitCount ?? 0;
+      }
+      if (parsed.contentQuery) {
+        if ((mode === "simple" || mode === "fuzzy") && searchFn) {
+          const lines = text.split(/\r?\n/);
+          let c = 0;
+          for (const ln of lines) {
+            if (searchFn(ln)) c++;
+          }
+          filterHits.contentQuery = c;
+        } else if (mode === "regex") {
+          filterHits.contentQuery = regexMatchCount ?? 0;
+        }
+      }
+
       const logEntry: MatchLog = {
         path,
         name,
@@ -1161,6 +1259,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         searchResult: searchResult ?? undefined,
         regexMatchCount,
         excerpts,
+        filterHits,
       };
 
       matches.push(logEntry);
@@ -1186,27 +1285,132 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
     console.log("[ANS] 結果サンプル（最大10件）:", matches.slice(0, 10));
     console.log("[ANS] 全結果（ファイル単位の詳細）:", matches);
 
-    // 追加: ファイルごとのヒット行（抜粋）をDevToolsに見やすく出力
-    for (const m of matches) {
-      const count = m.excerpts?.length ?? 0;
+    // 追加: フィルタごとのログ出力（採用ファイルに対して）
+    const hasFilter = (len: number | undefined) => (typeof len === "number" ? len > 0 : false);
+
+    if (parsed.filePatterns.length > 0) {
       console.groupCollapsed(
-        `%c[ANS] ヒット行 ${count} 件 — ${m.path}`,
-        "color: #7fd3ff; font-weight: 600;"
+        `%c[ANS] フィルタ別内訳: file — 基準: ファイル名が各パターンに一致（AND）`,
+        "color:#9cf; font-weight:600;"
       );
-      if (count === 0) {
-        console.log("（抜粋なし）");
-      } else {
-        for (const ex of m.excerpts!) {
-          const ln = ex.line + 1; // 1-based 表示
-          const reasons = ex.sources.join(", ");
-          console.log(`${ln}: ${ex.text}`, { reasons });
-        }
-        if ((m.excerpts?.length ?? 0) >= 10) {
-          console.log("…（このファイルのログは最大10行に制限しています）");
-        }
+      console.log("使用パターン:", parsed.filePatterns);
+      for (const m of matches) {
+        console.log(`${m.path}: fileパターン一致数=${m.filterHits?.file ?? 0}`);
       }
       console.groupEnd();
     }
+
+    if (parsed.pathPatterns.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: path — 基準: パスが各パターンに一致（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用パターン:", parsed.pathPatterns);
+      for (const m of matches) {
+        console.log(`${m.path}: pathパターン一致数=${m.filterHits?.path ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.tagFilters.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: tag — 基準: タグ集合に各フィルタがマッチ（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用フィルタ:", parsed.tagFilters);
+      for (const m of matches) {
+        console.log(`${m.path}: タグフィルタ一致数=${m.filterHits?.tag ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.propertyFilters.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: property — 基準: フロントマターの指定プロパティが一致（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用フィルタ:", parsed.propertyFilters);
+      for (const m of matches) {
+        console.log(`${m.path}: プロパティフィルタ一致数=${m.filterHits?.property ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.sectionPatterns.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: section — 基準: 見出しテキストが各パターンに一致（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用パターン:", parsed.sectionPatterns);
+      for (const m of matches) {
+        console.log(`${m.path}: sectionパターン一致数=${m.filterHits?.section ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.blockIdPatterns.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: block — 基準: ブロックIDが各パターンに一致（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用パターン:", parsed.blockIdPatterns);
+      for (const m of matches) {
+        console.log(`${m.path}: blockパターン一致数=${m.filterHits?.block ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.tasks) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: task — 基準: ${parsed.tasks} 条件に一致するタスク件数`,
+        "color:#9cf; font-weight:600;"
+      );
+      for (const m of matches) {
+        console.log(`${m.path}: タスク一致件数=${m.filterHits?.task ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.contentPatterns.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: content — 基準: 本文が各パターンに一致（AND）`,
+        "color:#9cf; font-weight:600;"
+      );
+      console.log("使用パターン:", parsed.contentPatterns);
+      for (const m of matches) {
+        console.log(`${m.path}: contentパターン一致数=${m.filterHits?.content ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.linePatterns.length > 0) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: line — 基準: 同一行に全語（AND）。ヒット行数（ユニーク）`,
+        "color:#9cf; font-weight:600;"
+      );
+      for (const m of matches) {
+        console.log(`${m.path}: lineヒット行数=${m.filterHits?.line ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    if (parsed.contentQuery) {
+      console.groupCollapsed(
+        `%c[ANS] フィルタ別内訳: contentQuery — 基準: ${mode} モードの本文クエリ一致`,
+        "color:#9cf; font-weight:600;"
+      );
+      const basis =
+        mode === "regex"
+          ? "本文の正規表現マッチ総数（全体）"
+          : "本文の行単位で searchFn が真を返した行数";
+      console.log("評価基準:", basis);
+      for (const m of matches) {
+        console.log(`${m.path}: contentQuery一致数=${m.filterHits?.contentQuery ?? 0}`);
+      }
+      console.groupEnd();
+    }
+
+    // 指示: 「ヒット行 ○ 件 — path」ログは不要のため削除
 
     new Notice(
       `ANS: 検索完了。ファイル ${matchedFiles} 件、line ヒット ${totalLineHits} 件（DevToolsのコンソールを参照）。`
