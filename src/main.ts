@@ -20,6 +20,21 @@ type SearchMode = "fuzzy" | "simple" | "regex";
 type SortMode = "mtime-desc" | "mtime-asc" | "path-asc";
 
 /**
+ * 本文クエリの対象フィールド。
+ * デフォルトではすべて true（Vault内のあらゆる文字列を横断）。
+ */
+interface ContentQueryTargets {
+  body: boolean;
+  name: boolean;
+  path: boolean;
+  frontmatter: boolean; // キー名と値の両方を対象
+  tags: boolean;
+  headings: boolean;
+  blocks: boolean;
+  tasks: boolean;
+}
+
+/**
  * ユーザーが指定する検索オプション。
  */
 interface SearchOptions {
@@ -27,6 +42,7 @@ interface SearchOptions {
   caseSensitive: boolean;
   sort: SortMode;
   limit?: number | null;
+  contentQueryTargets: ContentQueryTargets;
 }
 
 /**
@@ -320,8 +336,8 @@ function contentContains(text: string, pattern: string, caseSensitive: boolean):
  * ヒット行の抜粋情報。
  */
 interface Excerpt {
-  line: number;        // 0-based
-  text: string;        // 行テキスト（整形済み）
+  line: number;        // 0-based（疑似行は -1 を許容）
+  text: string;        // 行テキスト（整形済み）または擬似説明
   sources: string[];   // どの条件でヒットしたか（"line", "content:<pattern>", "contentQuery:<mode>" など）
 }
 
@@ -339,6 +355,8 @@ function formatLineForLog(s: string, maxLen = 240): string {
  * - line: AND用の1本の正規表現を行ごとに適用。
  * - content: 各パターンを行ごとに適用。
  * - 本文クエリ: simple/fuzzyは searchFn を行ごとに、regexは regexForContentQuery を行ごとに適用。
+ *
+ * 注意: 本文クエリの「本文以外」フィールドに対する抜粋は runNativeLikeSearch 内で別途生成し、mergeExcerpts で統合します。
  */
 function extractHitLines(
   text: string,
@@ -378,8 +396,8 @@ function extractHitLines(
     }
   }
 
-  // 本文クエリ（自由語）: simple/fuzzy/regex
-  if (parsed.contentQuery) {
+  // 本文クエリ（自由語）: simple/fuzzy/regex — 本文（body）のみここで行単位抽出
+  if (parsed.contentQuery && options.contentQueryTargets.body) {
     if ((mode === "simple" || mode === "fuzzy") && searchFn) {
       for (let i = 0; i < lines.length; i++) {
         if (searchFn(lines[i])) addReason(i, `contentQuery:${mode}`);
@@ -520,6 +538,17 @@ interface FilterHitStats {
   content?: number;
   line?: number;
   contentQuery?: number;
+  // 追加: 本文クエリ対象別の内訳
+  contentQueryBreakdown?: {
+    body?: number;
+    name?: number;
+    path?: number;
+    frontmatter?: number;
+    tags?: number;
+    headings?: number;
+    blocks?: number;
+    tasks?: number;
+  };
 }
 
 /**
@@ -547,9 +576,9 @@ interface MatchLog {
     hitCount: number; // このファイル内の行ヒット数（ユニーク行）
     hitLineIndices: number[]; // 行番号（0-based）
   } | null;
-  // prepare*Searchの結果（あれば）
+  // prepare*Searchの結果（本文＝body向け）
   searchResult?: any;
-  // regexモード時のマッチ数（簡易）
+  // regexモード時のマッチ数（本文クエリの総数; 対象全体）
   regexMatchCount?: number;
   // 抜粋行（ログ表示用、最大 N 行）
   excerpts?: Excerpt[];
@@ -586,6 +615,18 @@ class QueryPromptModal extends Modal {
   private sortSelect!: HTMLSelectElement;
   private limitInput!: HTMLInputElement;
 
+  // 本文クエリ対象
+  private cqTargetCheckboxes: {
+    body: HTMLInputElement;
+    name: HTMLInputElement;
+    path: HTMLInputElement;
+    frontmatter: HTMLInputElement;
+    tags: HTMLInputElement;
+    headings: HTMLInputElement;
+    blocks: HTMLInputElement;
+    tasks: HTMLInputElement;
+  } | null = null;
+
   constructor(app: App, onSubmit: (parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) => void) {
     super(app);
     this.onSubmit = onSubmit;
@@ -603,6 +644,9 @@ class QueryPromptModal extends Modal {
 
     // 一般コンテンツ検索（prepareFuzzy/Simple/Regex）
     this.contentQueryInputEl = this.makeTextRow(contentEl, "本文クエリ（fuzzy/simple/regex 用）", "例: quick brown", null);
+
+    // 本文クエリの対象（Vault横断）
+    this.makeContentQueryTargetsRow(contentEl);
 
     // file:
     this.makeAddableFilterRow(
@@ -702,6 +746,52 @@ class QueryPromptModal extends Modal {
       });
     }
     return inputEl;
+  }
+
+  // 本文クエリ対象（Vault横断）
+  private makeContentQueryTargetsRow(parent: HTMLElement) {
+    const wrap = parent.createEl("div");
+    wrap.style.marginTop = "8px";
+
+    const title = wrap.createEl("div", { text: "本文クエリの対象（Vault横断）" });
+    title.addClass("setting-item-name");
+
+    const grid = wrap.createEl("div");
+    grid.style.display = "grid";
+    grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(180px, 1fr))";
+    grid.style.gap = "6px";
+    grid.style.marginTop = "6px";
+
+    const makeCheckbox = (labelText: string): HTMLInputElement => {
+      const container = grid.createEl("label");
+      container.style.display = "flex";
+      container.style.alignItems = "center";
+      container.style.gap = "6px";
+      const cb = container.createEl("input", { type: "checkbox" });
+      cb.checked = true; // 既定でオン
+      const span = container.createEl("span", { text: labelText });
+      return cb;
+    };
+
+    const body = makeCheckbox("本文（Body）");
+    const name = makeCheckbox("ファイル名（Name）");
+    const path = makeCheckbox("パス（Path）");
+    const fm = makeCheckbox("フロントマター（キー・値）");
+    const tags = makeCheckbox("タグ（Tags）");
+    const headings = makeCheckbox("見出し（Headings）");
+    const blocks = makeCheckbox("ブロックID（Blocks）");
+    const tasks = makeCheckbox("タスク行（Tasks）");
+
+    this.cqTargetCheckboxes = {
+      body,
+      name,
+      path,
+      frontmatter: fm,
+      tags,
+      headings,
+      blocks,
+      tasks,
+    };
   }
 
   // ユーティリティ: 配列に chip を追加＆再描画
@@ -1037,6 +1127,16 @@ class QueryPromptModal extends Modal {
       caseSensitive,
       sort: (this.sortSelect.value as SortMode) ?? "mtime-desc",
       limit: this.limitInput.value.trim() ? Math.max(1, Number(this.limitInput.value.trim())) : null,
+      contentQueryTargets: {
+        body: !!this.cqTargetCheckboxes?.body.checked,
+        name: !!this.cqTargetCheckboxes?.name.checked,
+        path: !!this.cqTargetCheckboxes?.path.checked,
+        frontmatter: !!this.cqTargetCheckboxes?.frontmatter.checked,
+        tags: !!this.cqTargetCheckboxes?.tags.checked,
+        headings: !!this.cqTargetCheckboxes?.headings.checked,
+        blocks: !!this.cqTargetCheckboxes?.blocks.checked,
+        tasks: !!this.cqTargetCheckboxes?.tasks.checked,
+      },
     };
 
     if (
@@ -1087,7 +1187,8 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
    * - line は「同じ行に全語」のAND条件で判定し、行ヒット数（ユニーク行）を集計します。
    * - デフォルトモードは Simple。
    * - 追加: 採用ファイルについてフィルタ別のヒット件数内訳を出力。
-   * - 修正: section フィルタのヒット見出し行を excerpts に反映。
+   * - 追加: 本文クエリを Vault 内の複数領域（本文・ファイル名・パス・FM・タグ・見出し・ブロックID・タスク行）に対して OR で適用。
+   * - 追加: 本文以外の領域ヒットを excerpts に擬似行として反映。
    */
   private async runNativeLikeSearch(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
     const t0 = performance.now();
@@ -1098,14 +1199,14 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       return;
     }
 
-    const { mode, caseSensitive, sort, limit } = options;
+    const { mode, caseSensitive, sort, limit, contentQueryTargets } = options;
 
     console.log("%c--- [ANS] ネイティブ風検索（開始） ---", "color: cyan; font-weight: bold;");
     console.log("[ANS] パース済みフィルタ:", parsed);
-    // 指示: UI状態（line terms）ログは不要のため削除
+    console.log("[ANS] 本文クエリ対象:", contentQueryTargets);
     console.log("[ANS] 対象ファイル数（Vault内のMarkdownファイル; app.vault.getMarkdownFiles() の結果）:", files.length);
 
-    // prepare*Search（自由語部分のみに適用）
+    // prepare*Search（自由語部分のみに適用; 文字列に対して真偽）
     let searchFn: ((text: string) => any) | null = null;
     if (parsed.contentQuery) {
       if (mode === "simple") {
@@ -1118,10 +1219,9 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       }
     }
 
-    // regexモード用
+    // regexモード用（本文クエリ: 非明示リテラルのとき caseSensitive を反映）
     let regexForContentQuery: RegExp | null = null;
     if (mode === "regex" && parsed.contentQuery) {
-      // /pattern/flags 形式ならそのまま、そうでなければ全文を正規表現として解釈（フラグは i 既定）
       regexForContentQuery =
         tryParseExplicitRegex(parsed.contentQuery) ??
         new RegExp(parsed.contentQuery, caseSensitive ? "" : "i");
@@ -1201,7 +1301,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         if (!ok) continue;
       }
 
-      // 本文取得（content:, line:, 自由語/regex）
+      // 本文取得（content:, line:, 自由語/regex、タスク抜粋などに使用）
       const text = await this.app.vault.cachedRead(file);
 
       // content（AND）
@@ -1227,25 +1327,252 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         };
       }
 
-      // 自由語（本文検索）
-      let searchResult: any = null;
-      let regexMatchCount: number | undefined;
+      // 本文クエリ（Vault横断 OR）— 少なくとも1領域でヒットが必要
+      let cqHit = !parsed.contentQuery; // 未指定ならスキップ相当で true
+      let cqHitsTotal = 0;
+      const cqBreakdown: FilterHitStats["contentQueryBreakdown"] = {};
+      let regexMatchTotal = 0;
+
+      // 抜粋（本文以外の領域ヒット分）
+      const cqExtraExcerpts: Excerpt[] = [];
+      const lines = text.split(/\r?\n/);
+
+      const testString = (s: string): { hit: boolean; count: number } => {
+        if (!s) return { hit: false, count: 0 };
+        if (mode === "regex" && regexForContentQuery) {
+          const all = s.match(regexForContentQuery);
+          return { hit: !!all && all.length > 0, count: all?.length ?? 0 };
+        } else if ((mode === "simple" || mode === "fuzzy") && searchFn) {
+          const r = !!searchFn(s);
+          return { hit: r, count: r ? 1 : 0 };
+        }
+        return { hit: false, count: 0 };
+      };
 
       if (parsed.contentQuery) {
-        if (mode === "simple" || mode === "fuzzy") {
-          if (searchFn) {
+        // body（本文全体）: 既存の searchResult は維持
+        let searchResult: any = null;
+        if (contentQueryTargets.body) {
+          if ((mode === "simple" || mode === "fuzzy") && searchFn) {
             searchResult = searchFn(text); // SearchResult | null
-            if (!searchResult) {
-              continue;
+            if (searchResult) {
+              cqHit = true;
+              // 行単位でヒット数を数える（内訳）
+              let c = 0;
+              for (const ln of lines) {
+                if (searchFn(ln)) c++;
+              }
+              cqBreakdown.body = c;
+              cqHitsTotal += c;
+            }
+          } else if (mode === "regex" && regexForContentQuery) {
+            const all = text.match(regexForContentQuery);
+            if (all && all.length > 0) {
+              cqHit = true;
+              cqBreakdown.body = all.length;
+              cqHitsTotal += all.length;
+              regexMatchTotal += all.length;
             }
           }
-        } else if (mode === "regex") {
-          if (regexForContentQuery) {
-            const all = text.match(regexForContentQuery);
-            if (!all) continue;
-            regexMatchCount = all.length;
+        }
+
+        // name
+        if (contentQueryTargets.name) {
+          const { hit, count } = testString(name);
+          if (hit) {
+            cqHit = true;
+            cqBreakdown.name = (cqBreakdown.name ?? 0) + count;
+            cqHitsTotal += count;
+            cqExtraExcerpts.push({
+              line: -1,
+              text: `[name] ${name}`,
+              sources: [`contentQuery:${mode}:name`],
+            });
           }
         }
+
+        // path
+        if (contentQueryTargets.path) {
+          const { hit, count } = testString(path);
+          if (hit) {
+            cqHit = true;
+            cqBreakdown.path = (cqBreakdown.path ?? 0) + count;
+            cqHitsTotal += count;
+            cqExtraExcerpts.push({
+              line: -1,
+              text: `[path] ${path}`,
+              sources: [`contentQuery:${mode}:path`],
+            });
+          }
+        }
+
+        // frontmatter（キー・値）
+        if (contentQueryTargets.frontmatter) {
+          const fm = cache?.frontmatter;
+          if (fm && typeof fm === "object") {
+            for (const key of Object.keys(fm)) {
+              const keyRes = testString(key);
+              const val = fm[key];
+              const values: string[] = Array.isArray(val)
+                ? val.map((x: any) => String(x ?? ""))
+                : [String(val ?? "")];
+
+              let localCount = 0;
+              if (keyRes.hit) {
+                localCount += keyRes.count;
+                cqExtraExcerpts.push({
+                  line: -1,
+                  text: `[frontmatter-key] ${key}`,
+                  sources: [`contentQuery:${mode}:frontmatter`],
+                });
+              }
+              for (const v of values) {
+                const { hit, count } = testString(v);
+                if (hit) {
+                  localCount += count;
+                  cqExtraExcerpts.push({
+                    line: -1,
+                    text: `[frontmatter] ${key}: ${v}`,
+                    sources: [`contentQuery:${mode}:frontmatter`],
+                  });
+                }
+              }
+              if (localCount > 0) {
+                cqHit = true;
+                cqBreakdown.frontmatter = (cqBreakdown.frontmatter ?? 0) + localCount;
+                cqHitsTotal += localCount;
+                regexMatchTotal += localCount;
+              }
+            }
+          }
+        }
+
+        // tags
+        if (contentQueryTargets.tags) {
+          const set = getTagsForFile(this.app, file);
+          let localCount = 0;
+          for (const tg of set) {
+            const { hit, count } = testString(tg);
+            if (hit) {
+              localCount += count;
+              cqExtraExcerpts.push({
+                line: -1,
+                text: `[tag] ${tg}`,
+                sources: [`contentQuery:${mode}:tags`],
+              });
+            }
+          }
+          if (localCount > 0) {
+            cqHit = true;
+            cqBreakdown.tags = (cqBreakdown.tags ?? 0) + localCount;
+            cqHitsTotal += localCount;
+            regexMatchTotal += localCount;
+          }
+        }
+
+        // headings（position.start.line があれば行テキストを抜粋）
+        if (contentQueryTargets.headings) {
+          const headings = (cache?.headings ?? []) as any[];
+          let localCount = 0;
+          for (const h of headings) {
+            const headingText: string = String(h?.heading ?? "");
+            if (!headingText) continue;
+            const { hit, count } = testString(headingText);
+            if (hit) {
+              localCount += count;
+              let lineIdx: number | undefined = h?.position?.start?.line;
+              if (typeof lineIdx !== "number") {
+                const off = h?.position?.start?.offset;
+                if (typeof off === "number") {
+                  lineIdx = offsetToLine(text, off);
+                }
+              }
+              const excerptText =
+                typeof lineIdx === "number" ? formatLineForLog(lines[lineIdx] ?? headingText) : headingText;
+              cqExtraExcerpts.push({
+                line: typeof lineIdx === "number" ? lineIdx : -1,
+                text: `[heading] ${excerptText}`,
+                sources: [`contentQuery:${mode}:headings`],
+              });
+            }
+          }
+          if (localCount > 0) {
+            cqHit = true;
+            cqBreakdown.headings = (cqBreakdown.headings ?? 0) + localCount;
+            cqHitsTotal += localCount;
+            regexMatchTotal += localCount;
+          }
+        }
+
+        // blocks（ID）
+        if (contentQueryTargets.blocks) {
+          const blocks = cache?.blocks;
+          let localCount = 0;
+          if (blocks && typeof blocks === "object") {
+            for (const id of Object.keys(blocks)) {
+              const { hit, count } = testString(id);
+              if (hit) {
+                localCount += count;
+                cqExtraExcerpts.push({
+                  line: -1,
+                  text: `[block] ^${id}`,
+                  sources: [`contentQuery:${mode}:blocks`],
+                });
+              }
+            }
+          }
+          if (localCount > 0) {
+            cqHit = true;
+            cqBreakdown.blocks = (cqBreakdown.blocks ?? 0) + localCount;
+            cqHitsTotal += localCount;
+            regexMatchTotal += localCount;
+          }
+        }
+
+        // tasks（listItems の行テキスト）
+        if (contentQueryTargets.tasks) {
+          const listItems = cache?.listItems;
+          let localCount = 0;
+          if (Array.isArray(listItems)) {
+            for (const it of listItems) {
+              let lineIdx: number | undefined = it?.position?.start?.line;
+              if (typeof lineIdx !== "number") {
+                const off = it?.position?.start?.offset;
+                if (typeof off === "number") {
+                  lineIdx = offsetToLine(text, off);
+                }
+              }
+              const lineText = typeof lineIdx === "number" ? String(lines[lineIdx] ?? "") : "";
+              if (!lineText) continue;
+              const { hit, count } = testString(lineText);
+              if (hit) {
+                localCount += count;
+                cqExtraExcerpts.push({
+                  line: typeof lineIdx === "number" ? lineIdx : -1,
+                  text: `[task] ${formatLineForLog(lineText)}`,
+                  sources: [`contentQuery:${mode}:tasks`],
+                });
+              }
+            }
+          }
+          if (localCount > 0) {
+            cqHit = true;
+            cqBreakdown.tasks = (cqBreakdown.tasks ?? 0) + localCount;
+            cqHitsTotal += localCount;
+            regexMatchTotal += localCount;
+          }
+        }
+
+        // 既存の searchResult をローカルに保持（本文用）
+        // 下で logEntry に格納
+        // ヒットしなければ continue
+        if (!cqHit) {
+          continue;
+        }
+
+        // 以降で使用するため searchResult と regexMatchTotal を準備
+        // simple/fuzzy の body searchResult は既に上で評価済み
+        // regex は合算値を持つ
       }
 
       // ここまで通過したらファイル採用
@@ -1269,7 +1596,10 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         parsed.sectionPatterns,
         caseSensitive
       );
-      const mergedExcerpts = mergeExcerpts(baseExcerpts, sectionExcerpts, 10);
+
+      // 追加: 本文以外（name/path/FM/tags/headings/blocks/tasks）の本文クエリ擬似抜粋をマージ
+      const mergedExcerpts1 = mergeExcerpts(baseExcerpts, sectionExcerpts, 10);
+      const mergedExcerpts = mergeExcerpts(mergedExcerpts1, cqExtraExcerpts, 10);
 
       // フィルタ別ヒット数（採用ファイルのみ）
       const filterHits: FilterHitStats = {};
@@ -1339,17 +1669,36 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       if (parsed.linePatterns.length > 0) {
         filterHits.line = lineDetail?.hitCount ?? 0;
       }
+
+      // 本文クエリの内訳と総数
       if (parsed.contentQuery) {
-        if ((mode === "simple" || mode === "fuzzy") && searchFn) {
-          const lines = text.split(/\r?\n/);
-          let c = 0;
-          for (const ln of lines) {
-            if (searchFn(ln)) c++;
-          }
-          filterHits.contentQuery = c;
-        } else if (mode === "regex") {
-          filterHits.contentQuery = regexMatchCount ?? 0;
+        filterHits.contentQueryBreakdown = { ...(filterHits.contentQueryBreakdown ?? {}) };
+        for (const k of Object.keys(contentQueryTargets) as Array<keyof ContentQueryTargets>) {
+          const val = (k === "body" || k === "name" || k === "path" || k === "frontmatter" || k === "tags" || k === "headings" || k === "blocks" || k === "tasks")
+            ? (k === "body" ? (filterHits.contentQueryBreakdown.body ?? 0) :
+               k === "name" ? (filterHits.contentQueryBreakdown.name ?? 0) :
+               k === "path" ? (filterHits.contentQueryBreakdown.path ?? 0) :
+               k === "frontmatter" ? (filterHits.contentQueryBreakdown.frontmatter ?? 0) :
+               k === "tags" ? (filterHits.contentQueryBreakdown.tags ?? 0) :
+               k === "headings" ? (filterHits.contentQueryBreakdown.headings ?? 0) :
+               k === "blocks" ? (filterHits.contentQueryBreakdown.blocks ?? 0) :
+               (filterHits.contentQueryBreakdown.tasks ?? 0))
+            : 0;
+          // 後段で上書きするため初期化だけ
+          (filterHits.contentQueryBreakdown as any)[k] = val;
         }
+        // 既に集計済みの cqBreakdown を反映
+        filterHits.contentQueryBreakdown = {
+          body: cqBreakdown.body ?? 0,
+          name: cqBreakdown.name ?? 0,
+          path: cqBreakdown.path ?? 0,
+          frontmatter: cqBreakdown.frontmatter ?? 0,
+          tags: cqBreakdown.tags ?? 0,
+          headings: cqBreakdown.headings ?? 0,
+          blocks: cqBreakdown.blocks ?? 0,
+          tasks: cqBreakdown.tasks ?? 0,
+        };
+        filterHits.contentQuery = Object.values(filterHits.contentQueryBreakdown).reduce((a, b) => a + (b ?? 0), 0);
       }
 
       const logEntry: MatchLog = {
@@ -1369,8 +1718,10 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
           lineTerms: uiState.lineTerms.length ? [...uiState.lineTerms] : undefined,
         },
         line: lineDetail,
-        searchResult: searchResult ?? undefined,
-        regexMatchCount,
+        // body に対する searchResult（simple/fuzzy のみ）
+        searchResult: (mode === "simple" || mode === "fuzzy") && parsed.contentQuery && contentQueryTargets.body && searchFn ? searchFn(text) : undefined,
+        // regex の総マッチ数（Vault横断合算）
+        regexMatchCount: (mode === "regex" && parsed.contentQuery) ? regexMatchTotal : undefined,
         excerpts: mergedExcerpts,
         filterHits,
       };
@@ -1506,16 +1857,12 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
 
     if (parsed.contentQuery) {
       console.groupCollapsed(
-        `%c[ANS] フィルタ別内訳: contentQuery — 基準: ${mode} モードの本文クエリ一致`,
+        `%c[ANS] フィルタ別内訳: contentQuery — 基準: 指定のモードで Vault 内の複数領域（本文・名前・パス・FM・タグ・見出し・ブロックID・タスク行）に一致した合計`,
         "color:#9cf; font-weight:600;"
       );
-      const basis =
-        mode === "regex"
-          ? "本文の正規表現マッチ総数（全体）"
-          : "本文の行単位で searchFn が真を返した行数";
-      console.log("評価基準:", basis);
       for (const m of matches) {
-        console.log(`${m.path}: contentQuery一致数=${m.filterHits?.contentQuery ?? 0}`);
+        console.log(`${m.path}: contentQuery合計=${m.filterHits?.contentQuery ?? 0}`);
+        console.log("内訳:", m.filterHits?.contentQueryBreakdown);
       }
       console.groupEnd();
     }
