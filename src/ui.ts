@@ -82,81 +82,158 @@ export class QueryPromptModal extends Modal {
 
   onOpen() {
     const { contentEl } = this;
+
+    // Expand modal width to use available space
+    this.modalEl.style.width = "90%";
+    this.modalEl.style.maxWidth = "800px";
+
     contentEl.empty();
+    contentEl.style.width = "100%";
 
-    contentEl.createEl("h3", { text: "Advanced Native-like Search (Filter Builder)" });
+    // Top-level title (h1)
+    contentEl.createEl("h1", { text: "Advanced Native Search" });
 
-    const info = contentEl.createEl("div");
-    info.addClass("setting-item-description");
-    info.setText("Enter text for each option and click '+' to add filters. Added filters are AND-combined.");
+    // =========================
+    // Global Query section
+    // =========================
+    {
+      const h2 = contentEl.createEl("h2", { text: "Global Query" });
+      h2.style.color = "var(--text-accent)";
+      h2.style.marginTop = "24px";
 
-    // Global Query section (mode applies here)
-    this.makeGlobalQuerySection(contentEl);
+      const desc = contentEl.createEl("div");
+      desc.addClass("setting-item-description");
+      desc.style.marginTop = "4px";
+      desc.setText("Search across selected vault fields (body, file name, path, frontmatter, tags, headings).");
 
-    // Divider: Filters (case sensitivity applies here)
-    const divider = contentEl.createEl("hr");
-    divider.style.marginTop = "12px";
+      const note = contentEl.createEl("div");
+      note.addClass("setting-item-description");
+      note.style.marginTop = "4px";
+      note.setText("Note: Global Query is case-insensitive unless explicit regex flags are provided; in regex mode, omitting /.../flags defaults to i.");
 
-    // Filters: file
-    this.makeAddableFilterRow(
-      contentEl,
-      "file (File name — AND)",
-      "e.g., 2025-09 or *.md",
-      (v) => this.addChip(this.filePatterns, v),
-      () => this.filePatterns
-    );
+      const section = contentEl.createDiv();
+      section.style.marginTop = "8px";
 
-    // Filters: path
-    this.makeAddableFilterRow(
-      contentEl,
-      "path (Path — AND)",
-      "e.g., notes/project or */daily/*",
-      (v) => this.addChip(this.pathPatterns, v),
-      () => this.pathPatterns
-    );
+      this.makeGlobalQuerySection(section);
+    }
 
-    // Filters: tag
-    this.makeAddableFilterRow(
-      contentEl,
-      "tag (Tag — AND)",
-      "e.g., project or #project",
-      (v) => {
-        const tag = v.startsWith("#") ? v.slice(1) : v;
-        this.addChip(this.tagFilters, tag);
-      },
-      () => this.tagFilters
-    );
+    // =========================
+    // Filters section
+    // =========================
+    {
+      const h2 = contentEl.createEl("h2", { text: "Filters" });
+      h2.style.color = "var(--text-accent)";
+      h2.style.marginTop = "24px";
 
-    // Filters: content
-    this.makeAddableFilterRow(
-      contentEl,
-      "content (Body contains — AND)",
-      "e.g., endpoint or /end.*point/i",
-      (v) => this.addChip(this.contentPatterns, v),
-      () => this.contentPatterns
-    );
+      const desc = contentEl.createEl("div");
+      desc.addClass("setting-item-description");
+      desc.style.marginTop = "4px";
+      desc.setText("Conditions here are AND-combined to narrow down the files.");
 
-    // Filters: line (same line must contain ALL terms — AND)
-    this.makeLineRow(contentEl);
+      const section = contentEl.createDiv();
+      section.style.marginTop = "8px";
 
-    // Filters: headings (was section)
-    this.makeAddableFilterRow(
-      contentEl,
-      "headings (Heading text — AND)",
-      "e.g., Overview or /Chapter\\d+/",
-      (v) => this.addChip(this.headingPatterns, v),
-      () => this.headingPatterns
-    );
+      // Case sensitive (filters only)
+      {
+        const { controlEl } = this.createSettingItem(
+          section,
+          "Case sensitive",
+          "When enabled, filters distinguish uppercase and lowercase. Global Query is unaffected."
+        );
+        this.csCheckbox = controlEl.createEl("input", { type: "checkbox" });
+      }
 
-    // Filters: property (frontmatter)
-    this.makePropertyRow(contentEl);
+      // Filters: File
+      this.makeAddableFilterRow(
+        section,
+        "File",
+        "Match file names using substring, glob (* or ?), or explicit /regex/. Files must satisfy all added patterns (AND).",
+        (v) => this.addChip(this.filePatterns, v),
+        () => this.filePatterns,
+        "e.g., 2025-09 or *.md"
+      );
 
-    // Filter options (case sensitivity, sort, limit)
-    this.makeFilterOptionsRow(contentEl);
+      // Filters: Path
+      this.makeAddableFilterRow(
+        section,
+        "Path",
+        "Match the full vault path using substring, glob (* or ?), or explicit /regex/. Files must satisfy all added patterns (AND).",
+        (v) => this.addChip(this.pathPatterns, v),
+        () => this.pathPatterns,
+        "e.g., notes/project or */daily/*"
+      );
 
-    // Run
+      // Filters: Tag
+      this.makeAddableFilterRow(
+        section,
+        "Tag",
+        "Require the note's tags to match each added filter (AND). Supports plain tag names and explicit /regex/. Tags are collected from body and frontmatter.",
+        (v) => {
+          const tag = v.startsWith("#") ? v.slice(1) : v;
+          this.addChip(this.tagFilters, tag);
+        },
+        () => this.tagFilters,
+        "e.g., project or #project"
+      );
+
+      // Filters: Content
+      this.makeAddableFilterRow(
+        section,
+        "Content",
+        "Require the body to contain each added pattern (AND). Supports substring, glob (* or ?), and explicit /regex/.",
+        (v) => this.addChip(this.contentPatterns, v),
+        () => this.contentPatterns,
+        "e.g., endpoint or /end.*point/i"
+      );
+
+      // Filters: Line (AND terms on the same line)
+      this.makeLineRow(
+        section,
+        "Line",
+        "Require a single line to contain all added terms (AND). Terms can include quoted phrases.",
+        'e.g., har or "error 500"'
+      );
+
+      // Filters: Headings
+      this.makeAddableFilterRow(
+        section,
+        "Headings",
+        "Require heading text to match each added pattern (AND). Supports substring, glob (* or ?), and explicit /regex/.",
+        (v) => this.addChip(this.headingPatterns, v),
+        () => this.headingPatterns,
+        "e.g., Overview or /Chapter\\d+/"
+      );
+
+      // Filters: Property
+      this.makePropertyRow(
+        section,
+        "Property",
+        "Filter by frontmatter property name and optional value. With an empty value, checks existence. Value supports exact string or /regex/."
+      );
+    }
+
+    // =========================
+    // Common Options section
+    // =========================
+    {
+      const h2 = contentEl.createEl("h2", { text: "Common Options" });
+      h2.style.color = "var(--text-accent)";
+      h2.style.marginTop = "24px";
+
+      const desc = contentEl.createEl("div");
+      desc.addClass("setting-item-description");
+      desc.style.marginTop = "4px";
+      desc.setText("Settings applied to the overall search.");
+
+      const section = contentEl.createDiv();
+      section.style.marginTop = "8px";
+
+      this.makeFilterOptionsRow(section);
+    }
+
+    // Run button
     const buttonRow = contentEl.createEl("div");
-    buttonRow.style.marginTop = "12px";
+    buttonRow.style.marginTop = "16px";
     const runBtn = buttonRow.createEl("button", { text: "Run Search" });
     runBtn.onclick = () => this.submit();
   }
@@ -165,104 +242,148 @@ export class QueryPromptModal extends Modal {
     this.contentEl.empty();
   }
 
-  // Global Query section (mode and targets)
+  // Common: create a standard setting row with unified layout
+  private createSettingItem(parent: HTMLElement, name: string, description: string) {
+    // Use custom classes to avoid theme overrides that can center or add extra padding.
+    const settingItem = parent.createDiv("qpm-setting-item");
+    settingItem.style.display = "flex";
+    settingItem.style.flexDirection = "column";
+    settingItem.style.padding = "12px 0";
+    settingItem.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+    // Consistent two-column layout across all sections (1:1 split).
+    const rowEl = settingItem.createDiv("qpm-setting-item-row");
+    rowEl.style.display = "grid";
+    rowEl.style.gridTemplateColumns = "1fr 1fr"; // Equal widths for left and right columns.
+    rowEl.style.alignItems = "start";
+    rowEl.style.columnGap = "16px";
+    (rowEl.style as any).justifyItems = "stretch";
+
+    // Left column (label + description).
+    const infoEl = rowEl.createDiv("qpm-setting-item-info");
+    infoEl.style.margin = "0";
+    infoEl.style.padding = "0";
+    infoEl.style.textAlign = "left";
+    infoEl.style.boxSizing = "border-box";
+    infoEl.style.maxWidth = "100%";
+    infoEl.style.wordBreak = "break-word";
+    (infoEl.style as any).overflowWrap = "anywhere";
+
+    const nameEl = infoEl.createEl("div", { text: name, cls: "setting-item-name" });
+    nameEl.style.margin = "0 0 4px 0";
+    nameEl.style.padding = "0";
+    nameEl.style.textAlign = "left";
+
+    // Match the font styling used for other descriptions by applying the same class.
+    const descEl = infoEl.createEl("div", { text: description, cls: "setting-item-description" });
+    descEl.style.margin = "0";
+    descEl.style.padding = "0";
+    descEl.style.textAlign = "left";
+
+    // Right column (controls).
+    const controlEl = rowEl.createDiv("qpm-setting-item-control");
+    controlEl.style.display = "flex";
+    controlEl.style.flexDirection = "column"; // vertical stack (input row, chips/footer)
+    controlEl.style.alignItems = "stretch";   // stretch children to fill width
+    controlEl.style.gap = "8px";
+    controlEl.style.width = "100%";           // fill the right grid column
+    controlEl.style.boxSizing = "border-box";
+
+    return { settingItem, rowEl, infoEl, controlEl };
+  }
+
+  // Global Query section (Query, Mode, Targets)
   private makeGlobalQuerySection(parent: HTMLElement) {
-    const wrap = parent.createEl("div");
-    wrap.style.marginTop = "8px";
+    // Query
+    {
+      const { controlEl } = this.createSettingItem(
+        parent,
+        "Query",
+        "Enter the keywords to search in the Global Query."
+      );
+      const inputRow = controlEl.createDiv();
+      inputRow.style.display = "flex";
+      inputRow.style.gap = "8px";
+      inputRow.style.width = "100%";
 
-    const title = wrap.createEl("div", { text: "Global Query (applies across selected vault fields)" });
-    title.addClass("setting-item-name");
-
-    // Input
-    this.globalQueryInputEl = this.makeTextRow(
-      wrap,
-      "Query (fuzzy/simple/regex)",
-      "e.g., quick brown",
-      null
-    );
-
-    // Mode (affects Global Query)
-    const modeRow = wrap.createEl("div");
-    modeRow.style.display = "flex";
-    modeRow.style.alignItems = "center";
-    modeRow.style.gap = "8px";
-    modeRow.style.marginTop = "8px";
-
-    modeRow.createEl("label", { text: "Mode (Global Query only)" });
-    this.modeSelect = modeRow.createEl("select");
-    this.modeSelect.createEl("option", { text: "simple (space-separated AND)", value: "simple" });
-    this.modeSelect.createEl("option", { text: "fuzzy (Obsidian fuzzy)", value: "fuzzy" });
-    this.modeSelect.createEl("option", { text: "regex (regular expression)", value: "regex" });
-    this.modeSelect.value = "simple";
-
-    // Clarification note for case sensitivity and regex behavior.
-    const note = wrap.createEl("div");
-    note.addClass("setting-item-description");
-    note.style.marginTop = "6px";
-    note.setText(
-      "Note: Case sensitivity checkbox applies to filters only. Global Query ignores case sensitivity except for explicit regex flags. In regex mode, if you do not specify /.../flags, the default is case-insensitive (i)."
-    );
-
-    // Targets (vault-wide)
-    const targetsTitle = wrap.createEl("div", { text: "Global Query targets (vault-wide)" });
-    targetsTitle.addClass("setting-item-name");
-    targetsTitle.style.marginTop = "8px";
-
-    const grid = wrap.createEl("div");
-    grid.style.display = "grid";
-    grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(180px, 1fr))";
-    grid.style.gap = "6px";
-    grid.style.marginTop = "6px";
-
-    const makeCheckbox = (labelText: string): HTMLInputElement => {
-      const container = grid.createEl("label");
-      container.style.display = "flex";
-      container.style.alignItems = "center";
-      container.style.gap = "6px";
-      const cb = container.createEl("input", { type: "checkbox" });
-      cb.checked = true; // default ON
-      container.createEl("span", { text: labelText });
-      return cb;
-    };
-
-    const body = makeCheckbox("Body");
-    const name = makeCheckbox("File name");
-    const path = makeCheckbox("Path");
-    const fm = makeCheckbox("Frontmatter (keys and values)");
-    const tags = makeCheckbox("Tags");
-    const headings = makeCheckbox("Headings");
-
-    this.gqTargetCheckboxes = {
-      body,
-      name,
-      path,
-      frontmatter: fm,
-      tags,
-      headings,
-    };
-  }
-
-  // Utility: simple one-line text row
-  private makeTextRow(parent: HTMLElement, label: string, placeholder: string, onEnter: (() => void) | null): HTMLInputElement {
-    const row = parent.createEl("div");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
-    row.style.marginTop = "8px";
-
-    row.createEl("label", { text: label, cls: "setting-item-name" });
-    const inputEl = row.createEl("input", { type: "text", placeholder });
-    inputEl.style.flex = "1 1 auto";
-
-    if (onEnter) {
-      inputEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") onEnter();
+      this.globalQueryInputEl = inputRow.createEl("input", {
+        type: "text",
+        placeholder: "e.g., quick brown",
       });
+      // Ensure input grows and doesn't collapse.
+      this.globalQueryInputEl.style.flex = "1 1 0";
+      this.globalQueryInputEl.style.minWidth = "0";
+      this.globalQueryInputEl.style.width = "100%";
     }
-    return inputEl;
+
+    // Mode
+    {
+      const { controlEl } = this.createSettingItem(
+        parent,
+        "Mode",
+        "Select the search mode for Global Query."
+      );
+
+      const inputRow = controlEl.createDiv();
+      inputRow.style.display = "flex";
+      inputRow.style.gap = "8px";
+      inputRow.style.width = "100%";
+
+      this.modeSelect = inputRow.createEl("select");
+      this.modeSelect.createEl("option", { text: "simple (space-separated AND)", value: "simple" });
+      this.modeSelect.createEl("option", { text: "fuzzy (Obsidian fuzzy)", value: "fuzzy" });
+      this.modeSelect.createEl("option", { text: "regex (regular expression)", value: "regex" });
+      this.modeSelect.value = "simple";
+      this.modeSelect.style.flex = "1 1 0";
+      this.modeSelect.style.minWidth = "0";
+      this.modeSelect.style.width = "100%";
+    }
+
+    // Targets — place checkboxes inside the right column (controlEl)
+    {
+      const { controlEl } = this.createSettingItem(
+        parent,
+        "Targets",
+        "Select the vault fields to search across."
+      );
+
+      const grid = controlEl.createDiv("targets-grid");
+      grid.style.display = "grid";
+      grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(160px, 1fr))";
+      grid.style.gap = "6px";
+      grid.style.width = "100%";
+
+      const makeCheckbox = (labelText: string): HTMLInputElement => {
+        const container = grid.createEl("label");
+        container.style.display = "flex";
+        container.style.alignItems = "center";
+        container.style.gap = "6px";
+        container.style.justifyContent = "flex-start";
+        const cb = container.createEl("input", { type: "checkbox" });
+        cb.checked = true; // default ON
+        container.createEl("span", { text: labelText });
+        return cb;
+      };
+
+      const body = makeCheckbox("Body");
+      const name = makeCheckbox("File name");
+      const path = makeCheckbox("Path");
+      const fm = makeCheckbox("Frontmatter (keys and values)");
+      const tags = makeCheckbox("Tags");
+      const headings = makeCheckbox("Headings");
+
+      this.gqTargetCheckboxes = {
+        body,
+        name,
+        path,
+        frontmatter: fm,
+        tags,
+        headings,
+      };
+    }
   }
 
-  // Utility: add chip to array and refresh
+  // Utility: add chip to array and refresh all chip views
   private addChip(arr: string[], v: string) {
     const val = v.trim();
     if (!val) {
@@ -273,42 +394,47 @@ export class QueryPromptModal extends Modal {
     this.requestChipRefresh?.();
   }
 
-  // Shared chip refresh hook
+  // Shared chip refresh hook (chain all refreshers)
   private requestChipRefresh: (() => void) | null = null;
 
+  // Addable filter row (2-column layout; chips below input inside controlEl)
   private makeAddableFilterRow(
     parent: HTMLElement,
     label: string,
-    placeholder: string,
+    description: string,
     onAdd: (value: string) => void,
-    getList: () => string[]
+    getList: () => string[],
+    placeholder: string
   ) {
-    const wrap = parent.createEl("div");
-    wrap.style.marginTop = "8px";
+    const { settingItem, controlEl } = this.createSettingItem(parent, label, description);
 
-    const title = wrap.createEl("div", { text: label });
-    title.addClass("setting-item-name");
+    // 1) Input row (right column)
+    const inputRow = controlEl.createDiv();
+    inputRow.style.display = "flex";
+    inputRow.style.gap = "8px";
+    inputRow.style.width = "100%";
+    inputRow.style.boxSizing = "border-box";
 
-    const row = wrap.createEl("div");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
+    const inputEl = inputRow.createEl("input", { type: "text", placeholder });
+    inputEl.style.flex = "1 1 0";
+    inputEl.style.minWidth = "0";
+    inputEl.style.width = "100%";
 
-    const inputEl = row.createEl("input", { type: "text", placeholder });
-    inputEl.style.flex = "1 1 auto";
+    const addBtn = inputRow.createEl("button", { text: "+" });
 
-    const addBtn = row.createEl("button", { text: "+" });
-    addBtn.onclick = () => onAdd(inputEl.value);
-
+    const handleAdd = () => onAdd(inputEl.value);
+    addBtn.onclick = handleAdd;
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") onAdd(inputEl.value);
+      if (e.key === "Enter") handleAdd();
     });
 
-    const chipsEl = wrap.createEl("div");
+    // 2) Chips container directly beneath input
+    const chipsEl = controlEl.createDiv("qpm-setting-item-chips-container");
     chipsEl.style.display = "flex";
     chipsEl.style.flexWrap = "wrap";
     chipsEl.style.gap = "6px";
-    chipsEl.style.marginTop = "6px";
+    chipsEl.style.justifyContent = "flex-end"; // keep chips aligned to the right as before
+    chipsEl.style.width = "100%";
 
     const refresh = () => {
       chipsEl.empty();
@@ -337,29 +463,35 @@ export class QueryPromptModal extends Modal {
       refresh();
     };
     refresh();
+
+    return { settingItem, inputEl, addBtn, chipsEl };
   }
 
-  // line: same line must contain ALL terms (AND). Terms added as chips; internally combined via lookahead regex.
-  private makeLineRow(parent: HTMLElement) {
-    const wrap = parent.createEl("div");
-    wrap.style.marginTop = "8px";
+  // Line: same line must contain ALL terms — chips under input inside controlEl
+  private makeLineRow(
+    parent: HTMLElement,
+    label: string,
+    description: string,
+    placeholder: string
+  ) {
+    const { settingItem, controlEl } = this.createSettingItem(parent, label, description);
 
-    const title = wrap.createEl("div", { text: "line (terms that must appear on the same line — AND)" });
-    title.addClass("setting-item-name");
+    const inputRow = controlEl.createDiv();
+    inputRow.style.display = "flex";
+    inputRow.style.gap = "8px";
+    inputRow.style.width = "100%";
 
-    const row = wrap.createEl("div");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
-
-    const inputEl = row.createEl("input", {
+    const inputEl = inputRow.createEl("input", {
       type: "text",
-      placeholder: 'e.g., har or "error 500". Space-separated input adds multiple terms at once.',
-    });
-    inputEl.style.flex = "1 1 auto";
+      placeholder,
+    }) as HTMLInputElement;
+    inputEl.style.flex = "1 1 0";
+    inputEl.style.minWidth = "0";
+    inputEl.style.width = "100%";
 
-    const addBtn = row.createEl("button", { text: "+" });
-    addBtn.onclick = () => {
+    const addBtn = inputRow.createEl("button", { text: "+" });
+
+    const handleAdd = () => {
       const val = inputEl.value.trim();
       if (!val) {
         new Notice("Value is empty.");
@@ -376,15 +508,17 @@ export class QueryPromptModal extends Modal {
       refresh();
     };
 
+    addBtn.onclick = handleAdd;
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") addBtn.onclick?.(null as any);
+      if (e.key === "Enter") handleAdd();
     });
 
-    const chipsEl = wrap.createEl("div");
+    const chipsEl = controlEl.createDiv("qpm-setting-item-chips-container");
     chipsEl.style.display = "flex";
     chipsEl.style.flexWrap = "wrap";
     chipsEl.style.gap = "6px";
-    chipsEl.style.marginTop = "6px";
+    chipsEl.style.justifyContent = "flex-end";
+    chipsEl.style.width = "100%";
 
     const refresh = () => {
       chipsEl.empty();
@@ -405,30 +539,71 @@ export class QueryPromptModal extends Modal {
         };
       });
     };
+
+    const prev = this.requestChipRefresh;
+    this.requestChipRefresh = () => {
+      prev?.();
+      refresh();
+    };
     refresh();
+
+    return { settingItem, inputEl, addBtn, chipsEl };
   }
 
-  // property: name + value(optional)
-  private makePropertyRow(parent: HTMLElement) {
-    const wrap = parent.createEl("div");
-    wrap.style.marginTop = "8px";
+  // Property: name + value (optional) — chips under inputs inside controlEl
+  private makePropertyRow(parent: HTMLElement, label: string, description: string) {
+    const { settingItem, controlEl } = this.createSettingItem(parent, label, description);
 
-    const title = wrap.createEl("div", { text: "property (Frontmatter — AND)" });
-    title.addClass("setting-item-name");
+    const inputsRow = controlEl.createDiv();
+    inputsRow.style.display = "flex";
+    inputsRow.style.gap = "8px";
+    inputsRow.style.width = "100%";
 
-    const row = wrap.createEl("div");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
+    const nameEl = inputsRow.createEl("input", { type: "text", placeholder: "Property name (e.g., status)" }) as HTMLInputElement;
+    nameEl.style.flex = "1 1 40%";
+    nameEl.style.minWidth = "0";
 
-    const nameEl = row.createEl("input", { type: "text", placeholder: "Property name (e.g., status)" });
-    const valueEl = row.createEl("input", { type: "text", placeholder: "Value (e.g., done or /d(?!one)/i)" });
+    const valueEl = inputsRow.createEl("input", { type: "text", placeholder: "Value (e.g., done or /d(?!one)/i)" }) as HTMLInputElement;
+    valueEl.style.flex = "1 1 60%";
+    valueEl.style.minWidth = "0";
 
-    nameEl.style.flex = "0 0 160px";
-    valueEl.style.flex = "1 1 auto";
+    const addBtn = inputsRow.createEl("button", { text: "+" });
 
-    const addBtn = row.createEl("button", { text: "+" });
-    addBtn.onclick = () => {
+    const chipsEl = controlEl.createDiv("qpm-setting-item-chips-container");
+    chipsEl.style.display = "flex";
+    chipsEl.style.flexWrap = "wrap";
+    chipsEl.style.gap = "6px";
+    chipsEl.style.justifyContent = "flex-end";
+    chipsEl.style.width = "100%";
+
+    const refresh = () => {
+      chipsEl.empty();
+      this.propertyFilters.forEach((pf, idx) => {
+        const valStr =
+          pf.value === null
+            ? "(exists)"
+            : pf.value instanceof RegExp
+            ? `/${pf.value.source}/${pf.value.flags}`
+            : String(pf.value);
+        const labelText = `${pf.name}:${valStr}`;
+        const chip = chipsEl.createEl("span", { text: labelText });
+        chip.style.border = "1px solid var(--background-modifier-border)";
+        chip.style.borderRadius = "12px";
+        chip.style.padding = "2px 8px";
+        chip.style.display = "inline-flex";
+        chip.style.alignItems = "center";
+        chip.style.gap = "6px";
+
+        const del = chip.createEl("button", { text: "×" });
+        del.style.marginLeft = "6px";
+        del.onclick = () => {
+          this.propertyFilters.splice(idx, 1);
+          refresh();
+        };
+      });
+    };
+
+    const handleAdd = () => {
       const name = nameEl.value.trim();
       const raw = valueEl.value.trim();
       if (!name) {
@@ -445,83 +620,63 @@ export class QueryPromptModal extends Modal {
       refresh();
     };
 
+    addBtn.onclick = handleAdd;
     nameEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") addBtn.onclick?.(null as any);
+      if (e.key === "Enter") handleAdd();
     });
     valueEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") addBtn.onclick?.(null as any);
+      if (e.key === "Enter") handleAdd();
     });
 
-    const chipsEl = wrap.createEl("div");
-    chipsEl.style.display = "flex";
-    chipsEl.style.flexWrap = "wrap";
-    chipsEl.style.gap = "6px";
-    chipsEl.style.marginTop = "6px";
-
-    const refresh = () => {
-      chipsEl.empty();
-      this.propertyFilters.forEach((pf, idx) => {
-        const valStr =
-          pf.value === null
-            ? "(exists)"
-            : pf.value instanceof RegExp
-            ? `/${pf.value.source}/${pf.value.flags}`
-            : String(pf.value);
-        const label = `${pf.name}:${valStr}`;
-        const chip = chipsEl.createEl("span", { text: label });
-        chip.style.border = "1px solid var(--background-modifier-border)";
-        chip.style.borderRadius = "12px";
-        chip.style.padding = "2px 8px";
-        chip.style.display = "inline-flex";
-        chip.style.alignItems = "center";
-        chip.style.gap = "6px";
-
-        const del = chip.createEl("button", { text: "×" });
-        del.style.marginLeft = "6px";
-        del.onclick = () => {
-          this.propertyFilters.splice(idx, 1);
-          refresh();
-        };
-      });
+    const prev = this.requestChipRefresh;
+    this.requestChipRefresh = () => {
+      prev?.();
+      refresh();
     };
     refresh();
   }
 
-  // Filter options: case sensitivity, sort, limit
+  // Common Options: Sort, Max results — independent setting-items
   private makeFilterOptionsRow(parent: HTMLElement) {
-    const row = parent.createEl("div");
-    row.style.display = "grid";
-    row.style.gridTemplateColumns = "repeat(auto-fit, minmax(220px, 1fr))";
-    row.style.gap = "8px";
-    row.style.marginTop = "12px";
-
-    // Case sensitivity (filters only)
-    {
-      const cell = row.createEl("div");
-      const label = cell.createEl("label");
-      this.csCheckbox = cell.createEl("input", { type: "checkbox" });
-      this.csCheckbox.style.marginRight = "6px";
-      label.appendChild(this.csCheckbox);
-      label.appendText("Case sensitive (filters only)");
-    }
-
     // Sort
     {
-      const cell = row.createEl("div");
-      const label = cell.createEl("label", { text: "Sort" });
-      this.sortSelect = cell.createEl("select");
+      const { controlEl } = this.createSettingItem(
+        parent,
+        "Sort",
+        "Choose the ordering of the search results."
+      );
+      const inputRow = controlEl.createDiv();
+      inputRow.style.display = "flex";
+      inputRow.style.gap = "8px";
+      inputRow.style.width = "100%";
+
+      this.sortSelect = inputRow.createEl("select");
       this.sortSelect.createEl("option", { text: "Modified time (newest first)", value: "mtime-desc" });
       this.sortSelect.createEl("option", { text: "Modified time (oldest first)", value: "mtime-asc" });
       this.sortSelect.createEl("option", { text: "Path (ascending)", value: "path-asc" });
       this.sortSelect.value = "mtime-desc";
+      this.sortSelect.style.flex = "1 1 0";
+      this.sortSelect.style.minWidth = "0";
+      this.sortSelect.style.width = "100%";
     }
 
-    // Limit
+    // Max results
     {
-      const cell = row.createEl("div");
-      cell.createEl("label", { text: "Max results (leave empty for no limit)" });
-      this.limitInput = cell.createEl("input", { type: "number", placeholder: "e.g., 100" });
+      const { controlEl } = this.createSettingItem(
+        parent,
+        "Max results",
+        "Maximum number of results to display. Leave empty for no limit."
+      );
+      const inputRow = controlEl.createDiv();
+      inputRow.style.display = "flex";
+      inputRow.style.gap = "8px";
+      inputRow.style.width = "100%";
+
+      this.limitInput = inputRow.createEl("input", { type: "number", placeholder: "e.g., 100" });
       this.limitInput.min = "1";
+      this.limitInput.style.flex = "1 1 0";
+      this.limitInput.style.minWidth = "0";
+      this.limitInput.style.width = "100%";
     }
   }
 
