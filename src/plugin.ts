@@ -1,26 +1,65 @@
 // plugin.ts
-import { App, Notice, Plugin } from "obsidian";
-import { QueryPromptModal, ResultsModal } from "./ui";
-import { runSearch, ParsedQuery, SearchOptions } from "./search";
+import { App, Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { QueryPromptModal } from "./ui";
+import { runSearch, ParsedQuery, SearchOptions, MatchLog } from "./search";
+import { ResultsView, VIEW_TYPE_ANS_RESULTS } from "./resultsView";
+
+/**
+ * Settings
+ */
+interface AnsSettings {
+  defaultDisplayMode: "split" | "window";
+}
+
+const DEFAULT_SETTINGS: AnsSettings = {
+  defaultDisplayMode: "split",
+};
 
 export default class AdvancedNativeSearchPlugin extends Plugin {
-  async onload() {
-    console.log("Loading Advanced Native-like Search plugin");
+  settings: AnsSettings = { ...DEFAULT_SETTINGS };
 
+  // Track result leaves to reuse/close.
+  private splitLeaf: WorkspaceLeaf | null = null;
+  private windowLeaf: WorkspaceLeaf | null = null;
+
+  // Last search payload (used when toggling views).
+  private lastResults: MatchLog[] = [];
+  private lastCaseSensitive = false;
+  private lastSummary: { matchedFiles: number; totalLineHits: number; timeMs: number } | null = null;
+
+  async onload() {
+    await this.loadSettings();
+
+    console.log("Loading Advanced Native-like Search plugin (ANS) with persistent results view");
+
+    // Register the custom results view
+    this.registerView(VIEW_TYPE_ANS_RESULTS, (leaf) => {
+      const view = new ResultsView(leaf, this);
+      return view;
+    });
+
+    // Command to open filter builder and run
     this.addCommand({
       id: "ans-open-native-like-search",
       name: "ANS: Run native-like search (filter builder)",
       callback: () => {
-        new QueryPromptModal(this.app, (parsed, opts, uiState) => this.handleSearchSubmit(parsed, opts, uiState)).open();
+        new QueryPromptModal(this.app, (parsed, opts, uiState) =>
+          this.handleSearchSubmit(parsed, opts, uiState)
+        ).open();
       },
     });
   }
 
   onunload() {
     console.log("Unloading Advanced Native-like Search plugin");
+    // Do not forcibly detach leaves; let the workspace manage persistence.
   }
 
-  private async handleSearchSubmit(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
+  private async handleSearchSubmit(
+    parsed: ParsedQuery,
+    options: SearchOptions,
+    uiState: { lineTerms: string[] }
+  ) {
     const { matches, summary } = await runSearch(this.app, parsed, options, uiState);
 
     // Console summary
@@ -102,9 +141,137 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       console.groupEnd();
     }
 
-    // Show results modal UI
-    new ResultsModal(this.app, matches, { caseSensitive: options.caseSensitive }).open();
+    // Persist last search payload for toggling
+    this.lastResults = matches;
+    this.lastCaseSensitive = options.caseSensitive;
+    this.lastSummary = summary;
+
+    // Show results in persistent view using preferred mode
+    await this.showResults(matches, { caseSensitive: options.caseSensitive, displayMode: this.settings.defaultDisplayMode });
 
     new Notice(`ANS: Search finished. Files ${summary.matchedFiles}, line hits ${summary.totalLineHits}.`);
+  }
+
+  /**
+   * Open or reuse the results view in the requested mode, update its data, and ensure the opposite mode is closed.
+   */
+  async showResults(
+    results: MatchLog[],
+    opts: { caseSensitive: boolean; displayMode: "split" | "window" }
+  ) {
+    if (opts.displayMode === "split") {
+      // Close window if open
+      if (this.windowLeaf) {
+        try {
+          this.windowLeaf.detach();
+        } catch (e) {
+          console.warn("[ANS] Failed to detach window leaf:", e);
+        }
+        this.windowLeaf = null;
+      }
+
+      const view = await this.ensureSplitResultsView();
+      view.setData(results, {
+        caseSensitive: opts.caseSensitive,
+        displayMode: "split",
+        summary: this.lastSummary ?? null,
+      });
+      this.settings.defaultDisplayMode = "split";
+      await this.saveSettings();
+    } else {
+      // Close split if open
+      if (this.splitLeaf) {
+        try {
+          this.splitLeaf.detach();
+        } catch (e) {
+          console.warn("[ANS] Failed to detach split leaf:", e);
+        }
+        this.splitLeaf = null;
+      }
+
+      const view = await this.ensureWindowResultsView();
+      view.setData(results, {
+        caseSensitive: opts.caseSensitive,
+        displayMode: "window",
+        summary: this.lastSummary ?? null,
+      });
+      this.settings.defaultDisplayMode = "window";
+      await this.saveSettings();
+    }
+  }
+
+  /**
+   * Called by ResultsView header toggle buttons to switch modes immediately.
+   */
+  async requestSwitchDisplayMode(mode: "split" | "window") {
+    if (!this.lastResults) return;
+    if (this.settings.defaultDisplayMode === mode) {
+      // Already in the requested mode; nothing to do.
+      return;
+    }
+    await this.showResults(this.lastResults, {
+      caseSensitive: this.lastCaseSensitive,
+      displayMode: mode,
+    });
+  }
+
+  /**
+   * Ensure a split (center) results view exists and return it. Reuse existing when possible.
+   */
+  private async ensureSplitResultsView(): Promise<ResultsView> {
+    // Reuse if alive
+    if (this.splitLeaf && this.splitLeaf.view?.getViewType() === VIEW_TYPE_ANS_RESULTS) {
+      const v = this.splitLeaf.view as unknown as ResultsView;
+      // Reveal the leaf
+      this.app.workspace.revealLeaf(this.splitLeaf);
+      return v;
+    }
+
+    // Create new split from active leaf (center area). This splits to the right (vertical split).
+    const leaf = this.app.workspace.getLeaf("split");
+    await leaf.setViewState({ type: VIEW_TYPE_ANS_RESULTS, active: true });
+    leaf.setPinned(true);
+    this.splitLeaf = leaf;
+    const view = leaf.view as unknown as ResultsView;
+    return view;
+  }
+
+  /**
+   * Ensure a popout window results view exists and return it. Reuse existing when possible.
+   */
+  private async ensureWindowResultsView(): Promise<ResultsView> {
+    if (this.windowLeaf && this.windowLeaf.view?.getViewType() === VIEW_TYPE_ANS_RESULTS) {
+      const v = this.windowLeaf.view as unknown as ResultsView;
+      // Focus window if possible
+      try {
+        (v as any)?.win?.focus?.();
+      } catch {}
+      return v;
+    }
+
+    // Open a popout leaf (window)
+    const pop = (this.app.workspace as any).openPopoutLeaf?.();
+    if (!pop) {
+      // Fallback: if popout not available, split instead
+      console.warn("[ANS] Popout leaf not available; falling back to split.");
+      return await this.ensureSplitResultsView();
+    }
+    const leaf: WorkspaceLeaf = pop;
+    await leaf.setViewState({ type: VIEW_TYPE_ANS_RESULTS, active: true });
+    try {
+      leaf.setPinned(true);
+    } catch {}
+    this.windowLeaf = leaf;
+    const view = leaf.view as unknown as ResultsView;
+    return view;
+  }
+
+  async loadSettings() {
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
   }
 }
