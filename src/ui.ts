@@ -56,11 +56,11 @@ export class QueryPromptModal extends Modal {
   private headingPatterns: string[] = [];
   private propertyFilters: Array<{ name: string; value: string | RegExp | null }> = [];
 
-  // Global Query input (prepare*Search / regex)
+  // Global Query input (prepare*Search / regex / exact)
   private globalQueryInputEl!: HTMLInputElement;
+  private currentMode: SearchMode = "simple";
 
   // options
-  private modeSelect!: HTMLSelectElement;      // affects Global Query only
   private csCheckbox!: HTMLInputElement;       // affects filters only
   private sortSelect!: HTMLSelectElement;
   private limitInput!: HTMLInputElement;
@@ -240,7 +240,7 @@ export class QueryPromptModal extends Modal {
     const runBtn = buttonRow.createEl("button", { text: "Run Search" });
     runBtn.onclick = () => this.submit();
 
-    // Keyboard shortcut: Ctrl+Enter (Win/Linux) or Cmd+Enter (macOS) to run search
+    // Keyboard shortcut: Ctrl/Cmd+Enter (Win/Linux) or Cmd+Enter (macOS) to run search
     this.keydownHandler = (e: KeyboardEvent) => {
       // Avoid triggering during IME composition
       if ((e as any).isComposing) return;
@@ -313,16 +313,17 @@ export class QueryPromptModal extends Modal {
     return { settingItem, rowEl, infoEl, controlEl };
   }
 
-  // Global Query section (Query, Mode, Targets)
+  // Global Query section (Query, Mode segmented, Targets)
   private makeGlobalQuerySection(parent: HTMLElement) {
     // Query
+    let inputRow: HTMLDivElement;
     {
       const { controlEl } = this.createSettingItem(
         parent,
         "Query",
-        "Enter the keywords to search in the Global Query."
+        "Enter your Global Query. Mode buttons below change how it is interpreted."
       );
-      const inputRow = controlEl.createDiv();
+      inputRow = controlEl.createDiv();
       inputRow.style.display = "flex";
       inputRow.style.gap = "8px";
       inputRow.style.width = "100%";
@@ -335,29 +336,102 @@ export class QueryPromptModal extends Modal {
       this.globalQueryInputEl.style.flex = "1 1 0";
       this.globalQueryInputEl.style.minWidth = "0";
       this.globalQueryInputEl.style.width = "100%";
-    }
 
-    // Mode
-    {
-      const { controlEl } = this.createSettingItem(
-        parent,
-        "Mode",
-        "Select the search mode for Global Query."
+      // Segmented Mode buttons just below the Query input
+      const segRow = controlEl.createDiv();
+      segRow.style.display = "flex";
+      segRow.style.alignItems = "center";
+      segRow.style.gap = "10px";
+      segRow.style.flexWrap = "wrap";
+
+      const btns: Array<{ value: SearchMode; btn: HTMLButtonElement; info: HTMLSpanElement }> = [];
+
+      const makeSegButton = (label: string, value: SearchMode, tooltip: string) => {
+        const wrap = segRow.createDiv();
+        wrap.style.display = "flex";
+        wrap.style.alignItems = "center";
+        wrap.style.gap = "6px";
+
+        const btn = wrap.createEl("button", { text: label });
+        btn.style.padding = "6px 10px";
+        btn.style.border = "1px solid var(--background-modifier-border)";
+        btn.style.borderRadius = "6px";
+        btn.style.cursor = "pointer";
+        btn.setAttr("role", "radio");
+
+        const info = wrap.createEl("span", { text: "i" });
+        info.title = tooltip;
+        info.style.display = "inline-flex";
+        info.style.alignItems = "center";
+        info.style.justifyContent = "center";
+        info.style.width = "18px";
+        info.style.height = "18px";
+        info.style.border = "1px solid var(--background-modifier-border)";
+        info.style.borderRadius = "50%";
+        info.style.fontSize = "12px";
+        info.style.color = "var(--text-muted)";
+        info.style.cursor = "help";
+
+        btn.onclick = () => {
+          this.currentMode = value;
+          refreshSegStyles();
+          refreshPlaceholder();
+        };
+
+        btns.push({ value, btn, info });
+      };
+
+      makeSegButton(
+        "Simple",
+        "simple",
+        "Space-separated AND search across selected targets. Case-insensitive. Good for quick queries."
+      );
+      makeSegButton(
+        "Fuzzy",
+        "fuzzy",
+        "Obsidian fuzzy matching. Characters can be non-adjacent. Case-insensitive. Useful for loose matches."
+      );
+      makeSegButton(
+        "Regex",
+        "regex",
+        "Treat the query as a regular expression. Defaults to case-insensitive unless flags are provided (e.g., /.../i)."
+      );
+      makeSegButton(
+        "Exact",
+        "exact",
+        "Exact phrase match (contiguous substring). Case-insensitive. Quotes not required."
       );
 
-      const inputRow = controlEl.createDiv();
-      inputRow.style.display = "flex";
-      inputRow.style.gap = "8px";
-      inputRow.style.width = "100%";
+      const refreshSegStyles = () => {
+        for (const { value, btn } of btns) {
+          const selected = value === this.currentMode;
+          btn.style.backgroundColor = selected ? "var(--interactive-accent)" : "var(--background-secondary)";
+          btn.style.color = selected ? "var(--text-on-accent)" : "var(--text-normal)";
+          btn.style.opacity = selected ? "1" : "0.9";
+          btn.setAttr("aria-pressed", String(selected));
+        }
+      };
 
-      this.modeSelect = inputRow.createEl("select");
-      this.modeSelect.createEl("option", { text: "simple (space-separated AND)", value: "simple" });
-      this.modeSelect.createEl("option", { text: "fuzzy (Obsidian fuzzy)", value: "fuzzy" });
-      this.modeSelect.createEl("option", { text: "regex (regular expression)", value: "regex" });
-      this.modeSelect.value = "simple";
-      this.modeSelect.style.flex = "1 1 0";
-      this.modeSelect.style.minWidth = "0";
-      this.modeSelect.style.width = "100%";
+      const refreshPlaceholder = () => {
+        if (!this.globalQueryInputEl) return;
+        switch (this.currentMode) {
+          case "simple":
+            this.globalQueryInputEl.placeholder = "e.g., quick brown (space-separated AND)";
+            break;
+          case "fuzzy":
+            this.globalQueryInputEl.placeholder = "e.g., qb (fuzzy match)";
+            break;
+          case "regex":
+            this.globalQueryInputEl.placeholder = "e.g., /quick\\s+brown/i";
+            break;
+          case "exact":
+            this.globalQueryInputEl.placeholder = "e.g., star wars (contiguous phrase; no quotes needed)";
+            break;
+        }
+      };
+
+      refreshSegStyles();
+      refreshPlaceholder();
     }
 
     // Targets — place checkboxes inside the right column (controlEl)
@@ -754,7 +828,7 @@ export class QueryPromptModal extends Modal {
     };
 
     const options: SearchOptions = {
-      mode: (this.modeSelect.value as SearchMode) ?? "simple",
+      mode: this.currentMode,
       caseSensitive, // filters only
       sort: (this.sortSelect.value as SortMode) ?? "mtime-desc",
       limit: this.limitInput.value.trim() ? Math.max(1, Number(this.limitInput.value.trim())) : null,

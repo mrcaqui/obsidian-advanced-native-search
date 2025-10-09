@@ -4,7 +4,7 @@ import { App, TFile, prepareFuzzySearch, prepareSimpleSearch } from "obsidian";
 /**
  * Search mode for the Global Query.
  */
-export type SearchMode = "fuzzy" | "simple" | "regex";
+export type SearchMode = "fuzzy" | "simple" | "regex" | "exact";
 
 /**
  * Sort options.
@@ -42,7 +42,7 @@ export interface SearchOptions {
  * Parsed query (filters are all AND-combined).
  */
 export interface ParsedQuery {
-  // Global query (free-form across selected vault fields; prepare*Search/regex applied to strings)
+  // Global query (free-form across selected vault fields; prepare*Search/regex/applied to strings)
   globalQuery: string;
 
   // Dedicated operators (AND-combined)
@@ -50,7 +50,7 @@ export interface ParsedQuery {
   pathPatterns: string[];     // path:
   tagFilters: string[];       // tag: (may include leading #)
   contentPatterns: string[];  // content:
-  linePatterns: string[];     // line: (same line must contain ALL terms; implemented via a single lookahead regex)
+  linePatterns: string[];     // line: (same line must contain ALL terms (AND); implemented via a single lookahead regex)
   headingPatterns: string[];  // headings: (was section:)
   // Frontmatter / properties
   propertyFilters: Array<{ name: string; value: string | RegExp | null }>;
@@ -104,6 +104,7 @@ export interface MatchLog {
     contentPatterns?: string[];
     headingPatterns?: string[];
     lineTerms?: string[];
+    exactPhrase?: string; // for Exact mode highlighting
   };
   // line hit detail
   line: {
@@ -157,6 +158,31 @@ function includesWithCase(haystack: string, needle: string, caseSensitive: boole
     return haystack.toLowerCase().includes(needle.toLowerCase());
   }
   return haystack.includes(needle);
+}
+
+/**
+ * Case-insensitive includes (for Global Query: Exact and default behavior).
+ */
+function includesCI(haystack: string, needle: string): boolean {
+  if (!needle) return false;
+  return haystack.toLowerCase().includes(needle.toLowerCase());
+}
+
+/**
+ * Count occurrences (case-insensitive).
+ */
+function countOccurrencesCI(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  const h = haystack.toLowerCase();
+  const n = needle.toLowerCase();
+  let idx = 0, count = 0;
+  while (true) {
+    const pos = h.indexOf(n, idx);
+    if (pos === -1) break;
+    count++;
+    idx = pos + Math.max(1, n.length);
+  }
+  return count;
 }
 
 /**
@@ -325,7 +351,7 @@ function formatLineForLog(s: string, maxLen = 240): string {
  * Extract hit lines:
  * - line: apply single AND regex per line.
  * - content: apply each pattern per line.
- * - Global Query (body only here): simple/fuzzy via searchFn per line, regex via regexForGlobalQuery per line.
+ * - Global Query (body only here): simple/fuzzy via searchFn per line, regex via regexForGlobalQuery per line, exact via includesCI per line.
  *
  * Note: non-body Global Query excerpts (name/path/frontmatter/tags/headings) are generated separately and merged.
  */
@@ -335,6 +361,7 @@ function extractHitLines(
   options: SearchOptions,
   searchFn: ((text: string) => any) | null,
   regexForGlobalQuery: RegExp | null,
+  exactPhrase: string | null,
   perFileLimit = 10
 ): Excerpt[] {
   const { caseSensitive, mode } = options;
@@ -367,7 +394,7 @@ function extractHitLines(
     }
   }
 
-  // Global Query on body (simple/fuzzy/regex)
+  // Global Query on body (simple/fuzzy/regex/exact)
   if (parsed.globalQuery && options.globalQueryTargets.body) {
     if ((mode === "simple" || mode === "fuzzy") && searchFn) {
       for (let i = 0; i < lines.length; i++) {
@@ -377,6 +404,10 @@ function extractHitLines(
       // Use non-global regex for per-line test to avoid lastIndex issues.
       for (let i = 0; i < lines.length; i++) {
         if (regexForGlobalQuery.test(lines[i])) addReason(i, "globalQuery:regex");
+      }
+    } else if (mode === "exact" && exactPhrase) {
+      for (let i = 0; i < lines.length; i++) {
+        if (includesCI(lines[i], exactPhrase)) addReason(i, "globalQuery:exact");
       }
     }
   }
@@ -512,14 +543,14 @@ function countRegexMatches(text: string, rx: RegExp): number {
 
 /**
  * Test a single string against the Global Query.
- * Returns hit boolean and count (1 for simple/fuzzy; match count for regex).
- * Regex count uses globalized regex + matchAll for accuracy.
+ * Returns hit boolean and count (1 for simple/fuzzy/exact; match count for regex).
  */
 function testGlobalString(
   s: string,
   searchFn: ((text: string) => any) | null,
   regex: RegExp | null,
-  mode: SearchMode
+  mode: SearchMode,
+  exactPhrase?: string | null
 ): { hit: boolean; count: number } {
   if (!s) return { hit: false, count: 0 };
   if (mode === "regex" && regex) {
@@ -527,6 +558,9 @@ function testGlobalString(
     return { hit: count > 0, count };
   } else if ((mode === "simple" || mode === "fuzzy") && searchFn) {
     const r = !!searchFn(s);
+    return { hit: r, count: r ? 1 : 0 };
+  } else if (mode === "exact" && exactPhrase) {
+    const r = includesCI(s, exactPhrase);
     return { hit: r, count: r ? 1 : 0 };
   }
   return { hit: false, count: 0 };
@@ -544,29 +578,30 @@ function buildGlobalSyntheticExcerpts(
   targets: GlobalQueryTargets,
   searchFn: ((text: string) => any) | null,
   regex: RegExp | null,
-  mode: SearchMode
+  mode: SearchMode,
+  exactPhrase: string | null
 ): Excerpt[] {
   const ex: Excerpt[] = [];
   const lines = text.split(/\r?\n/);
 
-  const pushSynthetic = (label: string, value: string) => {
+  const pushSynthetic = (label: string, value: string, m: SearchMode) => {
     ex.push({
       line: -1,
       text: `[${label}] ${value}`,
-      sources: [`globalQuery:${mode}:${label.toLowerCase()}`],
+      sources: [`globalQuery:${m}:${label.toLowerCase()}`],
     });
   };
 
   // name
   if (targets.name) {
-    const { hit } = testGlobalString(name, searchFn, regex, mode);
-    if (hit) pushSynthetic("name", name);
+    const { hit } = testGlobalString(name, searchFn, regex, mode, exactPhrase);
+    if (hit) pushSynthetic("name", name, mode);
   }
 
   // path
   if (targets.path) {
-    const { hit } = testGlobalString(path, searchFn, regex, mode);
-    if (hit) pushSynthetic("path", path);
+    const { hit } = testGlobalString(path, searchFn, regex, mode, exactPhrase);
+    if (hit) pushSynthetic("path", path, mode);
   }
 
   // frontmatter
@@ -574,8 +609,8 @@ function buildGlobalSyntheticExcerpts(
     const fm = cache?.frontmatter;
     if (fm && typeof fm === "object") {
       for (const key of Object.keys(fm)) {
-        const keyRes = testGlobalString(key, searchFn, regex, mode);
-        if (keyRes.hit) pushSynthetic("frontmatter-key", key);
+        const keyRes = testGlobalString(key, searchFn, regex, mode, exactPhrase);
+        if (keyRes.hit) pushSynthetic("frontmatter-key", key, mode);
 
         const val = fm[key];
         const values: string[] = Array.isArray(val)
@@ -583,8 +618,8 @@ function buildGlobalSyntheticExcerpts(
           : [String(val ?? "")];
 
         for (const v of values) {
-          const res = testGlobalString(v, searchFn, regex, mode);
-          if (res.hit) pushSynthetic("frontmatter", `${key}: ${v}`);
+          const res = testGlobalString(v, searchFn, regex, mode, exactPhrase);
+          if (res.hit) pushSynthetic("frontmatter", `${key}: ${v}`, mode);
         }
       }
     }
@@ -619,8 +654,8 @@ function buildGlobalSyntheticExcerpts(
     }
 
     for (const tg of set) {
-      const res = testGlobalString(tg, searchFn, regex, mode);
-      if (res.hit) pushSynthetic("tag", tg);
+      const res = testGlobalString(tg, searchFn, regex, mode, exactPhrase);
+      if (res.hit) pushSynthetic("tag", tg, mode);
     }
   }
 
@@ -630,7 +665,7 @@ function buildGlobalSyntheticExcerpts(
     for (const h of headings) {
       const headingText: string = String(h?.heading ?? "");
       if (!headingText) continue;
-      const res = testGlobalString(headingText, searchFn, regex, mode);
+      const res = testGlobalString(headingText, searchFn, regex, mode, exactPhrase);
       if (res.hit) {
         let lineIdx: number | undefined = h?.position?.start?.line;
         if (typeof lineIdx !== "number") {
@@ -694,13 +729,14 @@ export async function runSearch(
     } else if (mode === "fuzzy") {
       searchFn = prepareFuzzySearch(parsed.globalQuery);
     } else {
-      searchFn = null; // regex handled separately
+      searchFn = null; // regex/exact handled separately
     }
   }
 
   // regex for Global Query:
   // - regexForGlobalQuerySearch: used for per-line/boolean tests (non-global to avoid lastIndex issues).
   let regexForGlobalQuerySearch: RegExp | null = null;
+  const exactPhrase = mode === "exact" && parsed.globalQuery ? parsed.globalQuery.trim() : null;
 
   if (mode === "regex" && parsed.globalQuery) {
     const explicit = tryParseExplicitRegex(parsed.globalQuery);
@@ -821,12 +857,21 @@ export async function runSearch(
           gqBreakdown.body = cnt;
           regexMatchTotal += cnt;
         }
+      } else if (mode === "exact" && exactPhrase) {
+        if (includesCI(text, exactPhrase)) {
+          gqHit = true;
+          let c = 0;
+          for (const ln of lines) {
+            if (includesCI(ln, exactPhrase)) c++;
+          }
+          gqBreakdown.body = c;
+        }
       }
     }
 
     // name
     if (parsed.globalQuery && globalQueryTargets.name) {
-      const { hit, count } = testGlobalString(name, searchFn, regexForGlobalQuerySearch, mode);
+      const { hit, count } = testGlobalString(name, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
       if (hit) {
         gqHit = true;
         gqBreakdown.name = (gqBreakdown.name ?? 0) + count;
@@ -836,7 +881,7 @@ export async function runSearch(
 
     // path
     if (parsed.globalQuery && globalQueryTargets.path) {
-      const { hit, count } = testGlobalString(path, searchFn, regexForGlobalQuerySearch, mode);
+      const { hit, count } = testGlobalString(path, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
       if (hit) {
         gqHit = true;
         gqBreakdown.path = (gqBreakdown.path ?? 0) + count;
@@ -850,7 +895,7 @@ export async function runSearch(
       if (fm && typeof fm === "object") {
         let localCount = 0;
         for (const key of Object.keys(fm)) {
-          const keyRes = testGlobalString(key, searchFn, regexForGlobalQuerySearch, mode);
+          const keyRes = testGlobalString(key, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
           if (keyRes.hit) localCount += keyRes.count;
 
           const val = fm[key];
@@ -859,7 +904,7 @@ export async function runSearch(
             : [String(val ?? "")];
 
           for (const v of values) {
-            const res = testGlobalString(v, searchFn, regexForGlobalQuerySearch, mode);
+            const res = testGlobalString(v, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
             if (res.hit) localCount += res.count;
           }
         }
@@ -876,7 +921,7 @@ export async function runSearch(
       const set = getTagsForFile(app, file);
       let localCount = 0;
       for (const tg of set) {
-        const res = testGlobalString(tg, searchFn, regexForGlobalQuerySearch, mode);
+        const res = testGlobalString(tg, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
         if (res.hit) localCount += res.count;
       }
       if (localCount > 0) {
@@ -893,7 +938,7 @@ export async function runSearch(
       for (const h of headings) {
         const headingText: string = String(h?.heading ?? "");
         if (!headingText) continue;
-        const res = testGlobalString(headingText, searchFn, regexForGlobalQuerySearch, mode);
+        const res = testGlobalString(headingText, searchFn, regexForGlobalQuerySearch, mode, exactPhrase);
         if (res.hit) localCount += res.count;
       }
       if (localCount > 0) {
@@ -915,6 +960,7 @@ export async function runSearch(
       options,
       searchFn,
       regexForGlobalQuerySearch,
+      exactPhrase,
       10
     );
 
@@ -934,7 +980,8 @@ export async function runSearch(
       globalQueryTargets,
       searchFn,
       regexForGlobalQuerySearch,
-      mode
+      mode,
+      exactPhrase
     );
 
     const mergedExcerpts1 = mergeExcerpts(baseExcerpts, headingFilterExcerpts, 10);
@@ -1015,6 +1062,7 @@ export async function runSearch(
         contentPatterns: parsed.contentPatterns.length ? [...parsed.contentPatterns] : undefined,
         headingPatterns: parsed.headingPatterns.length ? [...parsed.headingPatterns] : undefined,
         lineTerms: uiState.lineTerms.length ? [...uiState.lineTerms] : undefined,
+        exactPhrase: mode === "exact" && parsed.globalQuery ? parsed.globalQuery : undefined,
       },
       line: lineDetail,
       searchResult: (mode === "simple" || mode === "fuzzy") && parsed.globalQuery && globalQueryTargets.body && searchFn ? searchFn(text) : undefined,

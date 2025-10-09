@@ -185,7 +185,11 @@ export class ResultsView extends ItemView {
         body.style.marginTop = "6px";
         body.style.lineHeight = "1.5";
         body.style.wordBreak = "break-word";
-        body.innerHTML = this.computeHighlightedHTML({ text: ex.text, sources: ex.sources }, r.matched, this.caseSensitive);
+        body.innerHTML = this.computeHighlightedHTML(
+          { text: ex.text, sources: ex.sources },
+          r.matched,
+          this.caseSensitive
+        );
 
         card.onclick = async () => {
           await this.openFileAtLine(r.path, ex.line);
@@ -280,6 +284,7 @@ export class ResultsView extends ItemView {
     opts: {
       lineTerms?: string[];
       contentPatterns?: string[];
+      exactPhrase?: string; // case-insensitive highlight
       caseSensitive: boolean;
     }
   ): string {
@@ -300,6 +305,11 @@ export class ResultsView extends ItemView {
     // lineTerms: plain substrings
     for (const term of opts.lineTerms ?? []) {
       this.collectRangesPlain(text, term, opts.caseSensitive, ranges);
+    }
+
+    // exactPhrase: always case-insensitive highlight
+    if (opts.exactPhrase) {
+      this.collectRangesPlain(text, opts.exactPhrase, false, ranges);
     }
 
     const merged = this.mergeRanges(ranges);
@@ -334,9 +344,12 @@ export class ResultsView extends ItemView {
     const contentSources = excerpt.sources.filter((s) => s.startsWith("content:"));
     const contentPatterns = contentSources.map((s) => s.slice("content:".length)).filter(Boolean);
     const lineTerms = matched?.lineTerms ?? [];
+    const exactPhrase = matched?.exactPhrase ?? undefined;
+
     return this.buildHighlightedHTML(excerpt.text, {
       lineTerms,
       contentPatterns,
+      exactPhrase,
       caseSensitive,
     });
   }
