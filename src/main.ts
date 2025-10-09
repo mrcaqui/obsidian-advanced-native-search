@@ -374,6 +374,7 @@ function extractHitLines(
         if (searchFn(lines[i])) addReason(i, `globalQuery:${mode}`);
       }
     } else if (mode === "regex" && regexForGlobalQuery) {
+      // Use non-global regex for per-line test to avoid lastIndex issues.
       for (let i = 0; i < lines.length; i++) {
         if (regexForGlobalQuery.test(lines[i])) addReason(i, "globalQuery:regex");
       }
@@ -548,6 +549,24 @@ interface MatchLog {
 }
 
 /**
+ * Ensure a RegExp has global flag.
+ */
+function ensureGlobalRegex(rx: RegExp): RegExp {
+  const flags = rx.flags.includes("g") ? rx.flags : rx.flags + "g";
+  return new RegExp(rx.source, flags);
+}
+
+/**
+ * Count regex matches using matchAll on a globalized regex.
+ */
+function countRegexMatches(text: string, rx: RegExp): number {
+  const grx = ensureGlobalRegex(rx);
+  let count = 0;
+  for (const _ of text.matchAll(grx)) count++;
+  return count;
+}
+
+/**
  * Simple modal for building filters and running search.
  * - All filters added are AND-combined.
  * - line filter chips require ALL terms on the same line (internally combined via a lookahead regex).
@@ -703,6 +722,14 @@ class QueryPromptModal extends Modal {
     this.modeSelect.createEl("option", { text: "regex (regular expression)", value: "regex" });
     this.modeSelect.value = "simple";
 
+    // Clarification note for case sensitivity and regex behavior.
+    const note = wrap.createEl("div");
+    note.addClass("setting-item-description");
+    note.style.marginTop = "6px";
+    note.setText(
+      "Note: Case sensitivity checkbox applies to filters only. Global Query ignores case sensitivity except for explicit regex flags. In regex mode, if you do not specify /.../flags, the default is case-insensitive (i)."
+    );
+
     // Targets (vault-wide)
     const targetsTitle = wrap.createEl("div", { text: "Global Query targets (vault-wide)" });
     targetsTitle.addClass("setting-item-name");
@@ -822,14 +849,12 @@ class QueryPromptModal extends Modal {
         chip.style.alignItems = "center";
         chip.style.gap = "6px";
 
-        const del = chipsEl.createEl("button", { text: "×" });
+        const del = chip.createEl("button", { text: "×" });
         del.style.marginLeft = "6px";
         del.onclick = () => {
           list.splice(idx, 1);
           refresh();
         };
-        chip.appendChild(del);
-        chipsEl.appendChild(chip);
       });
     };
 
@@ -899,14 +924,12 @@ class QueryPromptModal extends Modal {
         chip.style.alignItems = "center";
         chip.style.gap = "6px";
 
-        const del = chipsEl.createEl("button", { text: "×" });
+        const del = chip.createEl("button", { text: "×" });
         del.style.marginLeft = "6px";
         del.onclick = () => {
           this.lineTerms.splice(idx, 1);
           refresh();
         };
-        chip.appendChild(del);
-        chipsEl.appendChild(chip);
       });
     };
     refresh();
@@ -980,14 +1003,12 @@ class QueryPromptModal extends Modal {
         chip.style.alignItems = "center";
         chip.style.gap = "6px";
 
-        const del = chipsEl.createEl("button", { text: "×" });
+        const del = chip.createEl("button", { text: "×" });
         del.style.marginLeft = "6px";
         del.onclick = () => {
           this.propertyFilters.splice(idx, 1);
           refresh();
         };
-        chip.appendChild(del);
-        chipsEl.appendChild(chip);
       });
     };
     refresh();
@@ -1113,6 +1134,11 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
    * - Adds: Global Query across multiple vault targets (body/name/path/frontmatter/tags/headings) OR-combined per file.
    * - Adds: Non-body target hits added to excerpts as synthetic lines.
    * - Important: caseSensitive applies to filters only; Global Query ignores caseSensitive (unless explicit /.../flags).
+   *
+   * Implementation notes:
+   * - Regex hit counting uses matchAll on a globalized regex for accurate counts.
+   * - Sort-first strategy: files are pre-sorted by the selected criterion; we then scan in that order
+   *   and stop early when limit is reached. This yields the top N in the chosen order with better performance.
    */
   private async runNativeLikeSearch(parsed: ParsedQuery, options: SearchOptions, uiState: { lineTerms: string[] }) {
     const t0 = performance.now();
@@ -1142,19 +1168,39 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       }
     }
 
-    // regex for Global Query (non-explicit literal uses case-insensitive by default)
-    let regexForGlobalQuery: RegExp | null = null;
+    // regex for Global Query:
+    // - regexForGlobalQuerySearch: used for per-line/boolean tests (non-global to avoid lastIndex issues).
+    // - regexForGlobalQueryCount: used for counting matches (globalized).
+    let regexForGlobalQuerySearch: RegExp | null = null;
+    let regexForGlobalQueryCount: RegExp | null = null;
+
     if (mode === "regex" && parsed.globalQuery) {
-      regexForGlobalQuery =
-        tryParseExplicitRegex(parsed.globalQuery) ??
-        new RegExp(parsed.globalQuery, "i"); // case-insensitive by default (filters use caseSensitive separately)
+      const explicit = tryParseExplicitRegex(parsed.globalQuery);
+      if (explicit) {
+        regexForGlobalQuerySearch = new RegExp(explicit.source, explicit.flags.replace(/g/g, ""));
+        regexForGlobalQueryCount = ensureGlobalRegex(explicit);
+      } else {
+        regexForGlobalQuerySearch = new RegExp(parsed.globalQuery, "i");
+        regexForGlobalQueryCount = new RegExp(parsed.globalQuery, "ig");
+      }
+    }
+
+    // Pre-sort files by selected criterion for top-N retrieval with early break.
+    const sortedFiles = [...files];
+    if (sort === "mtime-desc") {
+      sortedFiles.sort((a, b) => b.stat.mtime - a.stat.mtime);
+    } else if (sort === "mtime-asc") {
+      sortedFiles.sort((a, b) => a.stat.mtime - b.stat.mtime);
+    } else if (sort === "path-asc") {
+      sortedFiles.sort((a, b) => a.path.localeCompare(b.path));
     }
 
     const matches: MatchLog[] = [];
     let totalLineHits = 0;
     let matchedFiles = 0;
+    const maxResults = typeof limit === "number" && limit > 0 ? limit : Infinity;
 
-    for (const file of files) {
+    for (const file of sortedFiles) {
       const cache = this.app.metadataCache.getFileCache(file);
       const path = file.path;
       const name = file.name;
@@ -1242,19 +1288,19 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
             }
             gqBreakdown.body = c;
           }
-        } else if (mode === "regex" && regexForGlobalQuery) {
-          const all = text.match(regexForGlobalQuery);
-          if (all && all.length > 0) {
+        } else if (mode === "regex" && regexForGlobalQuerySearch) {
+          const cnt = countRegexMatches(text, regexForGlobalQuerySearch);
+          if (cnt > 0) {
             gqHit = true;
-            gqBreakdown.body = all.length;
-            regexMatchTotal += all.length;
+            gqBreakdown.body = cnt;
+            regexMatchTotal += cnt;
           }
         }
       }
 
       // name
       if (parsed.globalQuery && globalQueryTargets.name) {
-        const { hit, count } = testGlobalString(name, searchFn, regexForGlobalQuery, mode);
+        const { hit, count } = testGlobalString(name, searchFn, regexForGlobalQuerySearch, mode);
         if (hit) {
           gqHit = true;
           gqBreakdown.name = (gqBreakdown.name ?? 0) + count;
@@ -1264,7 +1310,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
 
       // path
       if (parsed.globalQuery && globalQueryTargets.path) {
-        const { hit, count } = testGlobalString(path, searchFn, regexForGlobalQuery, mode);
+        const { hit, count } = testGlobalString(path, searchFn, regexForGlobalQuerySearch, mode);
         if (hit) {
           gqHit = true;
           gqBreakdown.path = (gqBreakdown.path ?? 0) + count;
@@ -1278,7 +1324,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         if (fm && typeof fm === "object") {
           let localCount = 0;
           for (const key of Object.keys(fm)) {
-            const keyRes = testGlobalString(key, searchFn, regexForGlobalQuery, mode);
+            const keyRes = testGlobalString(key, searchFn, regexForGlobalQuerySearch, mode);
             if (keyRes.hit) localCount += keyRes.count;
 
             const val = fm[key];
@@ -1287,7 +1333,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
               : [String(val ?? "")];
 
             for (const v of values) {
-              const res = testGlobalString(v, searchFn, regexForGlobalQuery, mode);
+              const res = testGlobalString(v, searchFn, regexForGlobalQuerySearch, mode);
               if (res.hit) localCount += res.count;
             }
           }
@@ -1304,7 +1350,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         const set = getTagsForFile(this.app, file);
         let localCount = 0;
         for (const tg of set) {
-          const res = testGlobalString(tg, searchFn, regexForGlobalQuery, mode);
+          const res = testGlobalString(tg, searchFn, regexForGlobalQuerySearch, mode);
           if (res.hit) localCount += res.count;
         }
         if (localCount > 0) {
@@ -1321,7 +1367,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         for (const h of headings) {
           const headingText: string = String(h?.heading ?? "");
           if (!headingText) continue;
-          const res = testGlobalString(headingText, searchFn, regexForGlobalQuery, mode);
+          const res = testGlobalString(headingText, searchFn, regexForGlobalQuerySearch, mode);
           if (res.hit) localCount += res.count;
         }
         if (localCount > 0) {
@@ -1342,7 +1388,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         parsed,
         options,
         searchFn,
-        regexForGlobalQuery,
+        regexForGlobalQuerySearch,
         10
       );
 
@@ -1361,7 +1407,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
         cache,
         globalQueryTargets,
         searchFn,
-        regexForGlobalQuery,
+        regexForGlobalQuerySearch,
         mode
       );
 
@@ -1452,17 +1498,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
       };
 
       matches.push(logEntry);
-
-      if (limit && matches.length >= limit) break;
-    }
-
-    // sort
-    if (sort === "mtime-desc") {
-      matches.sort((a, b) => b.stat.mtime - a.stat.mtime);
-    } else if (sort === "mtime-asc") {
-      matches.sort((a, b) => a.stat.mtime - b.stat.mtime);
-    } else if (sort === "path-asc") {
-      matches.sort((a, b) => a.path.localeCompare(b.path));
+      if (matches.length >= maxResults) break;
     }
 
     const t1 = performance.now();
@@ -1580,6 +1616,7 @@ export default class AdvancedNativeSearchPlugin extends Plugin {
 /**
  * Test a single string against the Global Query.
  * Returns hit boolean and count (1 for simple/fuzzy; match count for regex).
+ * Regex count uses globalized regex + matchAll for accuracy.
  */
 function testGlobalString(
   s: string,
@@ -1589,8 +1626,8 @@ function testGlobalString(
 ): { hit: boolean; count: number } {
   if (!s) return { hit: false, count: 0 };
   if (mode === "regex" && regex) {
-    const all = s.match(regex);
-    return { hit: !!all && all.length > 0, count: all?.length ?? 0 };
+    const count = countRegexMatches(s, regex);
+    return { hit: count > 0, count };
   } else if ((mode === "simple" || mode === "fuzzy") && searchFn) {
     const r = !!searchFn(s);
     return { hit: r, count: r ? 1 : 0 };
@@ -1720,7 +1757,7 @@ function buildGlobalSyntheticExcerpts(
 }
 
 /* =========================
-   Results Modal UI (NEW)
+   Results Modal UI (Unified)
    ========================= */
 
 /**
